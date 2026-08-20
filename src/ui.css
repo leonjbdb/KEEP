@@ -1,0 +1,1150 @@
+/* ================================================================== */
+/* PHOSPHOR — KEEP design system v1                                    */
+/*                                                                     */
+/* One amber, one warning orange, a ladder of dimmed ambers for text.   */
+/* Mono is the machine talking, sans is a person reading. Printed pages */
+/* invert completely: white sheet, black ink, no glow.                  */
+/* ================================================================== */
+
+:root {
+  color-scheme: dark;
+
+  --screen: #080705;
+  --well: #060502;
+  --rule: #2b2210;
+  --amber: #ffb000;
+  --amber-lt: #ffd97a;
+  --filament: #ffe9b3;
+  --ink: #f2e3c2;
+  --copy: #b39d6e;
+  --dim: #8f7c50;
+  --label: #6b5a33;
+  --off: #4a4130;
+  --warn: #ff8a3c;
+  --reverse: #10130a;
+  --btn-ink: #c08c22;
+
+  --a03: rgba(255, 176, 0, 0.03);
+  --a05: rgba(255, 176, 0, 0.05);
+  --a07: rgba(255, 176, 0, 0.07);
+  --a09: rgba(255, 176, 0, 0.09);
+  --a12: rgba(255, 176, 0, 0.12);
+  --a16: rgba(255, 176, 0, 0.16);
+  --a28: rgba(255, 176, 0, 0.28);
+  --a30: rgba(255, 176, 0, 0.3);
+  --a42: rgba(255, 176, 0, 0.42);
+  --a60: rgba(255, 176, 0, 0.6);
+  --w45: rgba(255, 138, 60, 0.45);
+  --w55: rgba(255, 138, 60, 0.55);
+  --w07: rgba(255, 138, 60, 0.07);
+
+  --glow-head: 0 0 0.0625rem rgba(255, 238, 200, 0.8), 0 0 0.75rem rgba(255, 176, 0, 0.5),
+    0 0 2.375rem rgba(255, 176, 0, 0.22);
+  --glow-hover: 0 0 0.375rem rgba(255, 220, 140, 0.85), 0 0 1rem rgba(255, 176, 0, 0.6),
+    0 0 2.125rem rgba(255, 176, 0, 0.35);
+  --glow-value: 0 0 0.625rem rgba(255, 176, 0, 0.35);
+  --glow-key: 0 0 0.5rem rgba(255, 176, 0, 0.4);
+  --glow-copy: 0 0 0.5rem rgba(179, 157, 110, 0.3);
+
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+/* Global 150% scale: every screen length below is rem, so this one root
+   size multiplies the whole UI — the same geometry a browser shows at
+   150% zoom. Percentage, not px, so a user's own font-size preference
+   still multiplies through. The printed sheets (section 08) stay in
+   physical px/mm and are exempt on purpose: browser zoom never changes
+   what comes out of the printer. */
+html { font-size: 150%; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--screen);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* on body, not html: a font shorthand on html would reset the root
+   font-size (rem there resolves against the browser default) */
+body { font: 1rem/1.6 var(--sans); }
+
+::selection { background: var(--amber); color: var(--reverse); }
+
+/* Overlay scrollbars (src/scrollbar.js, ported from ravn-frontend): the
+   native bar is hidden and an SVG line takes its place — a filament thumb
+   that widens and brightens on hover and drag, identically in every
+   engine, because none of it is a native scrollbar. */
+html { scrollbar-width: none; }
+html::-webkit-scrollbar { display: none; }
+textarea.fieldin.grow,
+.well.secret.prose { scrollbar-width: none; }
+textarea.fieldin.grow::-webkit-scrollbar,
+.well.secret.prose::-webkit-scrollbar { display: none; }
+
+/* the wrapper an in-flow scrollable shares with its overlay */
+.scrollhost { position: relative; flex: 1; min-width: 0; }
+
+.kscroll {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: 18px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 60ms ease-out;
+  z-index: 6;
+}
+/* level with the shell, under the scan (3) and vignette (4) layers: the
+   page's gauge is drawn on the phosphor like everything else */
+.kscroll-page { position: fixed; top: 0; right: 0; bottom: auto; height: 100vh; z-index: 2; }
+.kscroll[data-on] { opacity: 1; }
+.kscroll svg { display: block; width: 100%; height: 100%; overflow: visible; }
+/* butt caps: square ends, matching the hard edges everywhere else */
+.kscroll path { fill: none; stroke-linecap: butt; }
+.kscroll .hit {
+  stroke: transparent;
+  stroke-width: 18px;
+  pointer-events: stroke;
+  cursor: grab;
+}
+.kscroll .thumb {
+  /* the amber of the rule and the active tab — one colour in every state;
+     only the width answers the hand */
+  stroke: var(--amber);
+  stroke-width: 3px;
+  transition: stroke-width 140ms ease;
+}
+.kscroll .hit:hover + .thumb,
+.kscroll[data-drag] .thumb { stroke-width: 8px; }
+.kscroll[data-drag] .hit { cursor: grabbing; }
+@media print { .kscroll { display: none; } }
+
+/* ================================================================== */
+/* 01 · shell — four fixed layers, then rail + column                  */
+/* ================================================================== */
+
+.fx { position: fixed; inset: 0; pointer-events: none; }
+.fx-glow {
+  z-index: 1;
+  background: radial-gradient(68.75rem 37.5rem at 50% -15%, #1a1408 0%, rgba(12, 10, 6, 0) 70%);
+  animation: kbreathe 9s ease-in-out infinite;
+}
+/* two-part CRT scan: a 0.25rem line grid that drifts, plus one bright bar rolling
+   down the screen the way an untriggered vertical hold does.
+   The pen's steps(60) jitter jumped the grid ~0.1625rem per step — a stepped
+   raster sliding over static text is what read as the page bobbing. Here the
+   grid instead crawls smoothly by exactly one 0.25rem tile per cycle: seamless at
+   the loop point, so only the lines move and the content stays nailed down. */
+.fx-scan { z-index: 3; overflow: hidden; }
+.fx-scan::before,
+.fx-scan::after {
+  content: "";
+  display: block;
+  position: absolute;
+  pointer-events: none;
+}
+.fx-scan::before {
+  left: 0;
+  width: 100%;
+  height: 0.125rem;
+  background: rgba(0, 0, 0, 0.3);
+  opacity: 0.75;
+  animation: kscanbar 6s linear infinite;
+}
+.fx-scan::after {
+  inset: 0;
+  background: linear-gradient(to bottom, transparent 50%, rgba(0, 0, 0, 0.3) 51%);
+  background-size: 100% 0.25rem;
+  animation: kscanlines 2s linear infinite;
+}
+@keyframes kscanbar { 0% { transform: translate3d(0, 200000%, 0); } }
+@keyframes kscanlines {
+  from { background-position: 0 0; }
+  to { background-position: 0 0.25rem; }
+}
+.fx-vig {
+  z-index: 4;
+  background: radial-gradient(135% 135% at 50% 45%, transparent 55%, rgba(0, 0, 0, 0.42) 100%);
+}
+@keyframes kbreathe { 0%, 100% { opacity: 0.7; } 50% { opacity: 1; } }
+
+.shell {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  min-height: 100vh;
+}
+
+.rail {
+  position: relative;
+  flex: none;
+  /* wide enough for the longest step label at the readable size, so nothing
+     in the list has to wrap or clip */
+  width: 12.25rem;
+  border-right: 0.0625rem solid var(--rule);
+  padding: 1.75rem 0.875rem;
+}
+.rail .railin {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  position: sticky;
+  top: 1.75rem;
+  min-height: calc(100vh - 3.5rem);
+}
+
+.main {
+  flex: 1;
+  min-width: 0;
+  max-width: 51.25rem;
+  margin: 0 auto;
+  padding: 3.5rem 2.625rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  justify-content: safe center;
+}
+.main.top { justify-content: flex-start; }
+
+@media (max-width: 1290px) { .main { padding: 2.75rem 1.75rem; } }
+@media (max-width: 900px) {
+  .rail { width: 9.375rem; padding: 1.375rem 0.625rem; }
+  .main { padding: 2rem 1.125rem; }
+}
+@media (max-width: 645px) {
+  /* 7.375rem fitted the old 0.5625rem labels; at a legible size the longest step
+     needs this much, and clipping the step you are on is not an option */
+  .rail { width: 8.375rem; padding: 1.25rem 0.5rem; }
+  .main { padding: 1.625rem 0.875rem; }
+}
+
+/* ================================================================== */
+/* 04 · rail — wordmark, step list / nav, key mark                     */
+/* ================================================================== */
+
+.kword {
+  user-select: none;
+  border: 0;
+  background: none;
+  padding: 0;
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  width: 5rem;
+  height: 1.875rem;
+  flex: none;
+  font-family: var(--mono);
+  font-size: 1.5rem;
+  font-weight: 800;
+  color: var(--amber-lt);
+  text-decoration: none;
+  text-shadow: 0 0 0.75rem rgba(255, 176, 0, 0.5);
+}
+.kword span {
+  pointer-events: none;
+  letter-spacing: 0.375rem;
+  margin-right: -0.375rem;
+  transition: letter-spacing 180ms cubic-bezier(0.34, 1.56, 0.64, 1),
+    margin-right 180ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.kword:hover span { letter-spacing: 0.125rem; margin-right: -0.125rem; }
+/* set for the first moments of a freshly rendered rail: a wordmark that
+   mounts under the pointer starts compact instead of animating there */
+.kword.nofx span { transition: none; }
+.kword { cursor: default; }
+button.kword { cursor: pointer; }
+.kword:focus-visible { outline: 0.125rem solid var(--amber); outline-offset: 0.25rem; }
+
+/* 0.625rem was below the size any checker will accept, and the pending steps sat
+   at 3:1 against the screen. Sizes and the two dimmed ambers below are set so
+   every state clears 4.5:1 at a readable size, with the ladder — done, then
+   pending — still reading as a ladder. */
+.steplist {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: 0.8125rem;
+  margin-top: 2.75rem;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.0875rem;
+  white-space: nowrap;
+}
+.steplist .now {
+  color: var(--reverse);
+  font-weight: 700;
+  background: var(--amber);
+  box-shadow: 0 0 1.125rem rgba(255, 176, 0, 0.45);
+  padding: 0.375rem 0.875rem;
+  margin: 0 0.25rem;
+  align-self: stretch;
+}
+.steplist .done { color: var(--copy); padding: 0 0.5rem; }
+.steplist .todo { color: var(--dim); padding: 0 0.5rem; }
+.steplist .navitem,
+.steplist .now { display: flex; align-items: center; gap: 0.5rem; }
+.steplist .icon svg { width: 0.8125rem; height: 0.8125rem; }
+.steplist .navitem {
+  color: var(--copy);
+  padding: 0 0.875rem;
+  text-decoration: none;
+  cursor: pointer;
+  background: none;
+  border: 0;
+  font: inherit;
+  text-align: left;
+  transition: color 0.14s linear, transform 0.16s cubic-bezier(0.33, 1, 0.68, 1),
+    text-shadow 0.14s linear;
+}
+.steplist .navitem:hover,
+.steplist .navitem:focus-visible {
+  color: var(--amber-lt);
+  transform: translateX(0.25rem);
+  text-shadow: 0 0 0.625rem rgba(255, 176, 0, 0.45);
+}
+/* narrow rails give up letter-spacing, never legibility: the size holds at
+   0.6875rem and the tracking absorbs the loss */
+@media (max-width: 900px) { .steplist { font-size: 0.6875rem; letter-spacing: 0.05625rem; } }
+@media (max-width: 645px) {
+  .steplist { font-size: 0.6875rem; letter-spacing: 0.01875rem; }
+  .steplist .now { padding: 0.375rem 0.4375rem; margin: 0 0.125rem; }
+  .steplist .done, .steplist .todo, .steplist .navitem { padding: 0 0.4375rem; }
+}
+
+/* the key mark: teeth are cut from the live parameters, long tooth =
+   a key that counts toward the threshold, short = spare */
+.markwrap { margin-top: auto; padding-top: 2.125rem; flex: none; line-height: 0; }
+/* the mark's width/height attributes are set in px by markMarkup(); this
+   rem height (with width from the viewBox ratio) puts it on the same
+   150% scale as everything else. .sheetmark overrides it back for paper. */
+.kmark {
+  height: 2.625rem;
+  width: auto;
+  overflow: visible;
+  padding: 0.375rem 0.625rem;
+  margin: -0.375rem -0.625rem;
+  box-sizing: content-box;
+  filter: drop-shadow(0 0 0.4375rem rgba(255, 176, 0, 0.45));
+}
+.kmark.is-out { padding: 1.25rem 4.375rem; margin: -1.25rem -4.375rem; }
+.kmark .kp { transform-box: fill-box; transform-origin: center; transform: translateX(0); }
+.kmark.is-out .kp { animation: kexplode 420ms cubic-bezier(0.34, 1.56, 0.64, 1) var(--ed) both; }
+.kmark.is-in .kp { animation: kimplode 340ms cubic-bezier(0.33, 1, 0.68, 1) var(--rd) both; }
+.kmark .kb {
+  transform-box: fill-box;
+  transform-origin: center;
+  transform: translateX(var(--mx, 0));
+  transition: transform 170ms cubic-bezier(0.33, 1, 0.68, 1);
+}
+@keyframes kexplode {
+  0% { transform: translateX(0); }
+  16% { transform: translateX(calc(var(--dx) * -0.14)); }
+  100% { transform: translateX(var(--dx)); }
+}
+@keyframes kimplode {
+  0% { transform: translateX(var(--dx)); }
+  72% { transform: translateX(calc(var(--dx) * -0.07)); }
+  100% { transform: translateX(0); }
+}
+
+/* ================================================================== */
+/* 03 · type                                                           */
+/* ================================================================== */
+
+.view { animation: view-in 220ms cubic-bezier(0.2, 0.7, 0.3, 1); }
+@keyframes view-in { from { opacity: 0; } to { opacity: 1; } }
+
+h1 {
+  margin: 0 0 0.875rem;
+  font-family: var(--mono);
+  font-size: 1.9375rem;
+  font-weight: 700;
+  line-height: 1.3;
+  letter-spacing: -0.03125rem;
+  color: var(--filament);
+  text-shadow: var(--glow-head);
+  text-wrap: pretty;
+}
+@media (max-width: 900px) { h1 { font-size: 1.5rem; } }
+.cur { color: var(--amber); animation: kblink 1.06s step-end infinite; }
+/* the blink hides the glyph rather than fading it to nothing: text left at
+   opacity 0 is still text a contrast checker will measure against the
+   background it is invisible on, and it reads as a false failure */
+@keyframes kblink { 0%, 49% { visibility: visible; } 50%, 100% { visibility: hidden; } }
+
+p { margin: 0 0 0.625rem; }
+.lead {
+  font-size: 0.90625rem;
+  line-height: 1.65;
+  color: var(--copy);
+  max-width: 64ch;
+  text-wrap: pretty;
+  text-shadow: var(--glow-copy);
+}
+.fine { font-size: 0.78125rem; line-height: 1.6; color: var(--dim); max-width: 64ch; }
+.keymeta {
+  font-family: var(--mono);
+  font-size: 0.78125rem;
+  letter-spacing: 0.0625rem;
+  font-weight: 700;
+  color: var(--amber-lt);
+}
+.rule { height: 0.125rem; flex: none; background: var(--amber); margin: 0.5rem 0 1.125rem; }
+.hair { height: 0.0625rem; flex: none; background: var(--rule); }
+a { color: var(--amber-lt); }
+
+/* the mono micro-labels: 0.625rem was under every checker's floor, and --label
+   scored 3:1 — both now sit where small caption text is still readable */
+.kicker {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.1125rem;
+  color: var(--dim);
+  margin-bottom: 0.5625rem;
+}
+/* when a kicker opens a new section straight after a list of rows */
+.kicker.spaced { margin-top: 2.125rem; }
+.strip {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 1.125rem 0 0.875rem;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.125rem;
+  color: var(--dim);
+  white-space: nowrap;
+}
+.strip .line { flex: 1; height: 0.0625rem; background: var(--rule); min-width: 0; }
+
+/* ================================================================== */
+/* 05 · controls                                                       */
+/* ================================================================== */
+
+.btnrow {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-top: 2rem;
+  flex-wrap: wrap;
+}
+/* Back / Cancel stay left, the one amber action is pinned to the right */
+.btnrow .btn-go, .btnrow .right { margin-left: auto; }
+/* a button row acting on the well above it (COPY / SAVE FILE HASH) belongs
+   to that well: the 2rem breathing room moves to the far side instead */
+.well + .btnrow { margin-top: 0; }
+.well + .btnrow + .note { margin-top: 2rem; }
+.btnrow .btn-go ~ .btn-go { margin-left: 0; }
+/* rows whose amber action leads instead of closing the screen */
+.btnrow.start .btn-go { margin-left: 0; }
+
+.btn {
+  font: 700 0.78125rem var(--mono);
+  letter-spacing: 0.15625rem;
+  white-space: nowrap;
+  max-width: 100%;
+  padding: 0.9375rem 1.625rem;
+  border: 0.0625rem solid var(--rule);
+  background: transparent;
+  color: var(--dim);
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  transition: border-color 0.15s linear, background 0.15s linear, color 0.15s linear,
+    text-shadow 0.15s linear, box-shadow 0.15s linear;
+}
+.btn .icon { margin-right: 0.625rem; }
+.btn .icon svg { width: 0.9375rem; height: 0.9375rem; display: block; }
+.btn:focus-visible { outline: 0.125rem solid var(--amber); outline-offset: 0.125rem; }
+
+.btn-ghost:hover { background: var(--a07); color: var(--amber-lt); }
+
+.btn-go {
+  border: 0.0625rem solid var(--a42);
+  background: var(--a05);
+  color: var(--btn-ink);
+  padding: 0.9375rem 1.75rem;
+}
+.btn-go:hover {
+  border-color: var(--amber);
+  background: var(--a12);
+  color: var(--amber);
+  text-shadow: var(--glow-hover);
+  box-shadow: 0 0 0.375rem rgba(255, 176, 0, 0.3), 0 0 2.125rem rgba(255, 176, 0, 0.18);
+}
+.btn-go:hover .gocur { animation: kblink 1.06s step-end infinite; }
+.gocur { color: inherit; }
+
+/* WCAG exempts inactive controls from contrast, but these say things worth
+   reading while they are disabled ("RUNNING…", a button waiting on input),
+   so the muted border carries the disabled state and the text stays legible */
+.btn[disabled] {
+  border-color: var(--rule);
+  background: transparent;
+  color: var(--dim);
+  cursor: not-allowed;
+  text-shadow: none;
+  box-shadow: none;
+}
+.btn[disabled]:hover { border-color: var(--rule); background: transparent; color: var(--dim); }
+.btn[disabled] .gocur { animation: none; }
+
+.btn-small { font-size: 0.75rem; padding: 0.75rem 1.25rem; }
+/* narrow screens: buttons wrap rather than push the column sideways */
+@media (max-width: 900px) {
+  .btn { white-space: normal; letter-spacing: 0.1rem; font-size: 0.75rem; padding: 0.8125rem 1rem; }
+  .btnrow { gap: 0.625rem; margin-top: 1.625rem; }
+  .kword { font-size: 1.25rem; width: 4.125rem; }
+}
+
+/* stepper */
+.stepper {
+  display: inline-flex;
+  width: fit-content;
+  align-items: stretch;
+  border: 0.0625rem solid var(--a42);
+  box-shadow: 0 0 0.875rem rgba(255, 176, 0, 0.06), inset 0 0 0.875rem rgba(255, 176, 0, 0.04);
+}
+.stepper button {
+  border: 0;
+  background: none;
+  cursor: pointer;
+  font: 700 0.9375rem var(--mono);
+  color: var(--amber);
+  padding: 0.625rem 1rem;
+  transition: background 0.14s, color 0.14s, box-shadow 0.14s;
+}
+.stepper button:hover:not([disabled]) { background: var(--a16); box-shadow: inset 0 0 1.375rem var(--a12); }
+.stepper button[disabled] { color: var(--off); cursor: not-allowed; }
+.stepper button:first-child { border-right: 0.0625rem solid var(--a28); }
+.stepper button:last-child { border-left: 0.0625rem solid var(--a28); }
+.stepper .val {
+  min-width: 3.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 700 1.1875rem var(--mono);
+  color: var(--filament);
+  text-shadow: var(--glow-value);
+}
+
+/* fields */
+/* a field label has to be readable to be a label: 0.75rem and the dimmed amber
+   that clears 4.5:1, rather than the 0.625rem --label that scored 3:1 */
+.flabel {
+  display: block;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.1rem;
+  color: var(--dim);
+  text-transform: uppercase;
+  margin-bottom: 0.75rem;
+}
+.fhint { font-size: 0.78125rem; color: var(--dim); line-height: 1.5; margin: -0.375rem 0 0.75rem; }
+.frow { display: flex; align-items: stretch; gap: 0.625rem; }
+.frow .btn { flex: none; width: 5.75rem; padding: 0; justify-content: center; }
+/* beside the multi-line box the toggle keeps button height instead of
+   stretching into a column as tall as the text area */
+.frow:has(textarea) { align-items: flex-start; }
+.frow:has(textarea) .btn { padding: 0.9375rem 0; }
+
+.fieldin {
+  font: 400 1rem var(--mono);
+  width: 100%;
+  min-width: 0;
+  display: block;
+  box-sizing: border-box;
+  background: var(--a03);
+  border: 0.0625rem solid var(--a28);
+  color: var(--filament);
+  letter-spacing: 0.0625rem;
+  padding: 0.875rem 1rem;
+  outline: none;
+  transition: border-color 0.15s linear, box-shadow 0.15s linear;
+}
+.fieldin:focus { border-color: var(--a60); box-shadow: 0 0 1.125rem rgba(255, 176, 0, 0.1); }
+/* placeholders are text too, and the only hint some fields carry */
+.fieldin::placeholder { color: var(--dim); }
+textarea.fieldin {
+  resize: none;
+  color: var(--amber-lt);
+  letter-spacing: 0.09375rem;
+  word-spacing: 0.5rem;
+  line-height: 1.9;
+  overflow-wrap: anywhere;
+}
+/* key entry is fixed-size on purpose (keys have one shape); the multi-line
+   secret does not, so its boxes scale vertically to the text being written */
+textarea.fieldin.grow { resize: vertical; min-height: 8rem; }
+.fieldin.is-ok { border-color: var(--a60); }
+.fieldin.is-bad { border-color: var(--w55); }
+
+.field { margin-bottom: 1.375rem; }
+/* the status note answers the pair directly above it: the last field keeps
+   only the note's own 0.875rem gap — the spacing the verify-key screen
+   uses between its input and its notice */
+.secretfields .field:last-child { margin-bottom: 0; }
+
+/* notices — they reserve their 3.25rem whether or not there is anything
+   to say, so layout never jumps under the user's hands */
+.note {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-height: 3.25rem;
+  box-sizing: border-box;
+  padding: 0.875rem 1rem;
+  margin: 0.875rem 0;
+  border: 0.0625rem solid transparent;
+  font-size: 0.875rem;
+  line-height: 1.55;
+}
+.note .icon { flex: none; display: inline-flex; }
+.note .icon svg { width: 1rem; height: 1rem; display: block; }
+.note .tail { margin-left: auto; font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.075rem; }
+.note-ok, .note-info { border-color: var(--a30); background: var(--a05); color: var(--amber); }
+.note-bad { border-color: var(--w45); background: var(--w07); color: var(--warn); }
+.note-blank { border-color: transparent; background: transparent; }
+.note strong { color: inherit; }
+.note code { font-family: var(--mono); font-size: 0.8125rem; color: var(--amber-lt); }
+
+/* ================================================================== */
+/* 06 · blocks                                                         */
+/* ================================================================== */
+
+.stats { display: flex; gap: 0.625rem; flex-wrap: wrap; margin: 0 0 1.5rem; }
+.stat { flex: 1; min-width: 9.375rem; border: 0.0625rem solid var(--rule); padding: 0.875rem 1rem; }
+.stat .l {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.1rem;
+  color: var(--dim);
+  margin-bottom: 0.5rem;
+}
+.stat .v {
+  font-family: var(--mono);
+  font-size: 0.9375rem;
+  font-weight: 700;
+  color: var(--filament);
+  text-shadow: var(--glow-value);
+  overflow-wrap: anywhere;
+}
+
+/* action rows — 2.625rem icon plate, 0.0625rem rules between, no card */
+.row {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 1.125rem;
+  padding: 1.375rem 1.125rem;
+  text-align: left;
+  text-decoration: none;
+  color: inherit;
+  background: none;
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+  transition: background 0.15s, box-shadow 0.15s;
+}
+.row:hover {
+  background: var(--a09);
+  box-shadow: inset 0 0 2.125rem var(--a07), 0 0 1.375rem var(--a12);
+}
+.row:hover .t { color: var(--filament); text-shadow: var(--glow-hover); }
+.row:hover .plate { box-shadow: 0 0 1.125rem var(--a16), inset 0 0 0.875rem var(--a07); }
+.row:hover .rowcur { visibility: visible; animation: kblink 1.06s step-end infinite; }
+.row:focus-visible { outline: 0.125rem solid var(--amber); outline-offset: -0.125rem; }
+.plate {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.625rem;
+  height: 2.625rem;
+  border: 0.0625rem solid var(--a42);
+  box-shadow: 0 0 0.875rem var(--a07), inset 0 0 0.875rem var(--a05);
+  color: var(--amber);
+}
+.plate svg { width: 1.1875rem; height: 1.1875rem; display: block; }
+.row .body { flex: 1; min-width: 0; }
+.row .t {
+  display: block;
+  font-size: 1.0625rem;
+  font-weight: 650;
+  margin-bottom: 0.25rem;
+  color: var(--amber-lt);
+  text-shadow: 0 0 0.625rem rgba(255, 176, 0, 0.3);
+}
+.row .d { display: block; font-size: 0.8125rem; color: var(--dim); line-height: 1.5; }
+/* hidden, not transparent — same reserved space, but no invisible text for a
+   contrast checker to measure (see kblink) */
+.rowcur { color: var(--amber); visibility: hidden; }
+.row.tall { padding: 1.875rem 1.125rem; }
+.row.tall .t { font-size: 1.125rem; }
+
+/* static information rows (precautions) */
+.prep { display: flex; align-items: center; gap: 1.25rem; padding: 1.375rem 1.125rem; transition: background 0.15s, box-shadow 0.15s; }
+.prep:hover {
+  background: var(--a05);
+  box-shadow: inset 0 0 2.5rem rgba(255, 176, 0, 0.04), 0 0 1.375rem var(--a12);
+}
+.prep:hover .t { color: var(--filament); text-shadow: var(--glow-hover); }
+.prep:hover .plate { box-shadow: 0 0 1.125rem var(--a16), inset 0 0 0.875rem var(--a07); }
+.prep .plate { width: 2.5rem; height: 2.5rem; }
+.prep .plate svg { width: 1.125rem; height: 1.125rem; }
+.prep .body { flex: 1; min-width: 0; }
+.prep .t {
+  display: block;
+  font-size: 1.03125rem;
+  font-weight: 650;
+  margin-bottom: 0.375rem;
+  color: var(--amber-lt);
+  text-shadow: 0 0 0.625rem rgba(255, 176, 0, 0.3);
+}
+.prep .d { display: block; font-size: 0.84375rem; color: var(--dim); line-height: 1.6; max-width: 62ch; }
+
+/* the well — hashes, keys, anything read aloud or typed back */
+.well {
+  border: 0.0625rem solid var(--a42);
+  background: var(--well);
+  box-shadow: inset 0 0 2.5rem var(--a07);
+  padding: 1.25rem 1.375rem;
+  margin: 0 0 0.875rem;
+  font-family: var(--mono);
+  font-size: 1.0625rem;
+  line-height: 2;
+  letter-spacing: 0.125rem;
+  word-spacing: 0.75rem;
+  color: var(--amber-lt);
+  text-shadow: var(--glow-key);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+.well.key { font-size: 1.1875rem; line-height: 2.1; letter-spacing: 0.125rem; word-spacing: 0.8125rem; padding: 1.5rem 1.625rem; }
+.well.secret { font-size: 1.375rem; letter-spacing: 0.1875rem; word-spacing: normal; line-height: 1.7; padding: 1.625rem; }
+/* a multi-line secret is read, not transcribed character by character:
+   body size, real line breaks kept, and room to scroll if it runs long */
+.well.secret.prose {
+  font-size: 1rem;
+  letter-spacing: 0.0625rem;
+  line-height: 1.75;
+  white-space: pre-wrap;
+  max-height: 24rem;
+  overflow-y: auto;
+}
+@media (max-width: 900px) {
+  .well { font-size: 0.875rem; padding: 1rem 0.875rem; word-spacing: 0.5rem; }
+  .well.key { font-size: 0.9375rem; padding: 1.125rem 1rem; word-spacing: 0.5rem; }
+  .well.secret { font-size: 1.0625rem; padding: 1.125rem 1rem; }
+}
+
+/* progress — 2.375rem bar, difference-blended label */
+.progress {
+  position: relative;
+  height: 2.375rem;
+  border: 0.0625rem solid rgba(255, 176, 0, 0.35);
+  padding: 0.0625rem;
+  overflow: hidden;
+}
+.progress .fill {
+  height: 100%;
+  width: 0;
+  background: var(--amber);
+  box-shadow: 0 0 0.875rem rgba(255, 176, 0, 0.5);
+  transition: width 220ms linear;
+}
+.progress .cap {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.1875rem;
+  /* difference-blend cutout: the label must be the exact fill amber, so over
+     the fill it cancels to black (cut out) and over the dark track it reads
+     amber. A lighter amber leaves green/blue channel residue — blue text. */
+  color: var(--amber);
+  mix-blend-mode: difference;
+}
+.busybox { display: flex; flex-direction: column; justify-content: center; min-height: 21.25rem; }
+
+/* self-test rows */
+.strow { display: flex; align-items: center; gap: 1.125rem; padding: 1rem 1.125rem; }
+.strow .n { font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.0625rem; flex: none; width: 1.625rem; color: var(--dim); }
+.strow .s { font-family: var(--mono); font-size: 0.75rem; font-weight: 700; letter-spacing: 0.0625rem; flex: none; width: 4.625rem; }
+.strow .s.pass { color: #7ed37f; }
+.strow .s.run { color: var(--amber); }
+/* the idle placeholder is still status text someone has to read, so it sits
+   at the readable dim rather than the near-invisible --off */
+.strow .s.wait { color: var(--dim); }
+.strow .s.fail { color: var(--warn); }
+.strow .body { flex: 1; min-width: 0; }
+.strow .t { font-size: 0.9375rem; font-weight: 600; margin-bottom: 0.1875rem; color: var(--amber-lt); text-shadow: 0 0 0.625rem rgba(255, 176, 0, 0.28); }
+.strow .d { font-size: 0.78125rem; color: var(--dim); line-height: 1.5; }
+.strow .ms {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.0625rem;
+  flex: none;
+  width: 4.25rem;
+  text-align: right;
+  white-space: nowrap;
+  color: var(--dim);
+}
+@media (max-width: 900px) {
+  .strow { gap: 0.625rem; padding: 0.875rem 0.25rem; }
+  .strow .d, .strow .ms { display: none; }
+}
+
+/* modal */
+.modal {
+  position: fixed;
+  inset: 0;
+  /* under the scan and vignette layers (3 and 4) so the sheet sits inside
+     the screen effect rather than floating on top of it; above .shell (2)
+     by DOM order, since the layer is appended to <body> after it */
+  z-index: 2;
+  background: rgba(4, 3, 2, 0.94);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+}
+.modal .msheet {
+  width: 100%;
+  max-width: 35rem;
+  background: #0c0a06;
+  border: 0.0625rem solid var(--a42);
+  box-shadow: 0 0 3.75rem rgba(0, 0, 0, 0.7), 0 0 2.125rem var(--a12);
+  padding: 1.875rem;
+}
+/* the sheet is already the warning: the message is plain copy, no box, in the
+   same amber as every lead paragraph on the screens behind it */
+.modal .mtext {
+  margin: 0 0 1.625rem;
+  font-size: 1rem;
+  line-height: 1.6;
+  color: var(--copy);
+  text-shadow: var(--glow-copy);
+  max-width: 52ch;
+  text-wrap: pretty;
+}
+
+/* ================================================================== */
+/* 08 · paper — the printed documents                                  */
+/* ================================================================== */
+
+/* the tabs sit straight on the amber rule below them, so they carry no
+   underline of their own and leave no gap before it */
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin: 1.25rem 0 0;
+}
+.tabs + .rule { margin-top: 0; }
+.tab {
+  font: 700 0.6875rem var(--mono);
+  letter-spacing: 0.125rem;
+  color: var(--dim);
+  background: none;
+  border: 0;
+  padding: 0.75rem 1rem;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.14s linear, background 0.14s linear, box-shadow 0.14s linear;
+}
+.tab:hover { color: var(--amber-lt); background: var(--a07); }
+.tab.on {
+  color: var(--reverse);
+  background: var(--amber);
+  box-shadow: 0 0 1.125rem rgba(255, 176, 0, 0.45);
+}
+.tab:focus-visible { outline: 0.125rem solid var(--amber); outline-offset: -0.125rem; }
+@media (max-width: 900px) { .tab { font-size: 0.59375rem; letter-spacing: 0.0625rem; padding: 0.625rem 0.5rem; } }
+
+.paper {
+  border: 0.0625rem solid var(--rule);
+  background: #100d07;
+  padding: 1.625rem;
+  overflow: hidden;
+}
+.papfit { transform-origin: top left; }
+
+/* One A4 sheet at 96dpi, with a 2cm margin as its own padding. The
+   printed page keeps exactly this geometry (@page margin 0, so the
+   browser has no margin box for its own header and footer; the sheet's
+   own 20mm padding is the margin), so preview and paper agree line for
+   line. */
+.sheet {
+  position: relative;
+  box-sizing: border-box;
+  width: 794px;
+  height: 1123px;
+  padding: 76px;
+  overflow: hidden;
+  background: #fff;
+  color: #141414;
+  text-shadow: none;
+  font: 400 15.2px/1.55 var(--sans);
+}
+.sheet + .sheet { margin-top: 26px; }
+/* wordmark left, print date right — the brand lives here, not in the titles */
+.sheethead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  font-family: var(--mono);
+  font-size: 13.4px;
+  margin-bottom: 30px;
+}
+.sheethead .sheetword {
+  font-size: 21px;
+  font-weight: 800;
+  letter-spacing: 6px;
+  margin-right: -6px;
+  color: #141414;
+}
+/* the key mark, inked: the rails' amber is set as an SVG attribute, and a
+   stylesheet rule beats a presentation attribute */
+.sheetmark {
+  position: absolute;
+  left: 76px;
+  bottom: 52px;
+  line-height: 0;
+}
+/* ink does not glow: drop the rail mark's phosphor halo on paper */
+.sheetmark .kmark { overflow: visible; height: 26px; width: auto; filter: none; }
+.sheetmark rect.kb { fill: #141414; }
+.sheetmark circle.kb { stroke: #141414; }
+.sheetfoot {
+  position: absolute;
+  right: 76px;
+  bottom: 56px;
+  font-family: var(--mono);
+  font-size: 13.4px;
+}
+.sheetbody { display: flow-root; }
+.sheet h1 {
+  font: 700 21.6px/1.25 var(--sans);
+  color: #141414;
+  text-shadow: none;
+  letter-spacing: -0.01em;
+  margin: 0 0 0.8em;
+}
+.sheet h2 {
+  font: 700 15.7px/1.3 var(--sans);
+  margin: 1.7em 0 0.5em;
+  padding-bottom: 5px;
+  border-bottom: 2px solid #141414;
+}
+.sheet p { margin: 1em 0; }
+.sheet ul, .sheet ol { margin: 1em 0; padding-left: 26px; }
+.sheet li { margin-bottom: 0.25em; }
+.sheet table { border-collapse: collapse; width: 100%; margin: 0.6em 0; }
+.sheet th, .sheet td {
+  border: 1px solid #999;
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: bottom;
+  font-size: 15.2px;
+  font-weight: 400;
+}
+.sheet th { background: #f3f3f3; font-size: 13.4px; font-weight: 600; }
+/* label/value table: the labels get a fixed share so a long hash wraps
+   in the value cell instead of squeezing the label */
+.sheet table.kv th { width: 34%; }
+.sheet .mono { font-family: var(--mono); overflow-wrap: anywhere; }
+.sheet .ul { text-decoration: underline; }
+.sheet .blank { display: block; height: 1.6em; border-bottom: 1px solid #555; }
+.sheet .blank.inline {
+  display: inline-block;
+  width: 260px;
+  height: 1.15em;
+  vertical-align: baseline;
+  margin-left: 6px;
+}
+.sheet .blank + .blank { margin-top: 0.9em; }
+/* an aside under the line it explains, not a paragraph in its own right */
+.sheet p.fineprint { margin: -0.55em 0 1em; font-size: 13.4px; color: #444; }
+.sheet .keyline { display: block; height: 2.4em; border-bottom: 1px solid #555; }
+.sheet .keyline + .keyline { margin-top: 1.1em; }
+.sheet tr, .sheet li, .sheet p { break-inside: avoid; orphans: 3; widows: 3; }
+
+@media print {
+  html, body { background: #fff; }
+  .fx, .rail, .noprint { display: none !important; }
+  .shell { display: block; min-height: 0; }
+  .main { max-width: none; margin: 0; padding: 0; display: block; }
+  .paper { border: 0; background: none; padding: 0; overflow: visible; }
+  .papfit { transform: none !important; width: auto !important; height: auto !important; }
+  .sheet {
+    width: auto;
+    /* full A4, less 1mm of slack so rounding cannot push a blank sheet
+       after every page; the 2cm margin is the sheet's own padding */
+    height: 296mm;
+    margin: 0;
+    padding: 20mm;
+    break-after: page;
+  }
+  .sheet:last-child { break-after: auto; }
+  .sheetfoot { right: 20mm; bottom: 15mm; }
+  /* margin: 0 leaves the browser no margin box to draw its own URL, title,
+     date and page-count furniture in — the printed page is only ours */
+  @page { size: A4; margin: 0; }
+}
+
+/* ================================================================== */
+/* 07 · motion kill switch                                             */
+/* ================================================================== */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
+/* narrow screens: the icon plate lines up with the row title once the
+   text wraps (declared last so it beats the base .row alignment) */
+@media (max-width: 900px) {
+  .row, .prep { align-items: flex-start; gap: 0.875rem; padding: 1.125rem 0.25rem; }
+}
+
+.icon { display: inline-flex; }
+.icon svg { display: block; }
+
+/* icon micro-animations — one run per hover of the surrounding row,
+   prep item, or button. Sub-part transforms use px on SVG children,
+   which the browser reads as viewBox units, so they scale with the
+   icon; only the whole-svg pen/blink nudges use rem. The global
+   prefers-reduced-motion block above disables all of these. Screen
+   only: paper sheets and shackles stay put on paper. */
+@media screen {
+  :is(.row, .prep, .btn, .navitem):hover .icon-rotate svg {
+    animation: ico-spin 1.2s ease-in-out 1;
+  }
+  :is(.row, .prep, .btn, .navitem):hover .icon-shield .i-draw {
+    stroke-dasharray: 1;
+    animation: ico-draw 0.55s ease-out 0.1s 1 both;
+  }
+  /* heartbeat: the trace wipes out left-to-right, then wipes back in
+     the same way and stays — starting and ending at the resting state */
+  :is(.row, .prep, .btn, .navitem):hover .icon-wave .i-draw {
+    stroke-dasharray: 1;
+    animation: ico-heart 0.8s linear both;
+  }
+  .icon-unlock .i-shackle {
+    transform-box: fill-box;
+    transform-origin: 8% 92%;
+    transition: transform 0.3s ease-in;
+  }
+  :is(.row, .prep, .btn, .navitem):hover .icon-unlock .i-shackle {
+    animation: ico-shackle 0.55s cubic-bezier(0.34, 1.56, 0.64, 1) 1 both;
+  }
+  /* printer: no sheet at rest — hovering prints one out, held until
+     the pointer leaves */
+  :is(.row, .prep, .btn, .navitem):hover .icon-printer .i-paper {
+    animation: ico-paper 0.6s ease-out both;
+  }
+  /* eye: the pupil glances left, then right, then settles back centre;
+     the outline never moves */
+  :is(.row, .prep, .btn, .navitem):hover .icon-eye .i-pupil {
+    animation: ico-look 1.4s ease-in-out 1;
+  }
+  /* pen: nib advances and wags as if writing (pivot at the tip),
+     holds until the pointer leaves */
+  .icon-pen .i-pen {
+    transform-box: fill-box;
+    transform-origin: 0% 100%;
+    transition: transform 0.3s ease-in;
+  }
+  :is(.row, .prep, .btn, .navitem):hover .icon-pen .i-pen {
+    animation: ico-write 0.7s ease-in-out both;
+  }
+  :is(.row, .prep, .btn, .navitem):hover .icon-download svg {
+    animation: ico-dip 0.45s ease-out 1;
+  }
+  /* wifi: hovering cuts the connection — the off-slash draws itself
+     corner to corner and holds until the pointer leaves */
+  :is(.row, .prep, .btn, .navitem):hover .icon-wifi .i-slash {
+    stroke-dasharray: 1;
+    animation: ico-slash 0.4s ease-out both;
+  }
+  /* status checks draw themselves in the moment they appear */
+  .icon-check .i-draw {
+    stroke-dasharray: 1;
+    animation: ico-draw 0.4s ease-out 1 both;
+  }
+  /* warnings rattle for attention the moment they appear — a dampened
+     side-to-side shake, wherever the icon shows up */
+  .icon-warning svg {
+    animation: ico-alarm 0.6s ease-in-out 1;
+  }
+  /* the rail's selected entry wears its icon's finished pose: padlock
+     open, sheet printed (the other icons already rest there) */
+  .steplist .now .i-shackle { transform: rotate(-27deg); }
+  .steplist .now .i-paper { opacity: 1; }
+}
+@keyframes ico-spin { to { transform: rotate(180deg); } }
+@keyframes ico-alarm {
+  0%, 100% { transform: rotate(0deg); }
+  15% { transform: rotate(-9deg); }
+  30% { transform: rotate(8deg); }
+  45% { transform: rotate(-6deg); }
+  60% { transform: rotate(4deg); }
+  75% { transform: rotate(-2deg); }
+}
+@keyframes ico-draw {
+  from { stroke-dashoffset: 1; }
+  to { stroke-dashoffset: 0; }
+}
+/* offset 0 -> -1 wipes the line out tail-first to the right; the jump
+   to 1 happens while the path is fully invisible, and 1 -> 0 draws it
+   back in head-first the same direction. */
+@keyframes ico-heart {
+  0% { stroke-dashoffset: 0; }
+  50% { stroke-dashoffset: -1; }
+  50.01% { stroke-dashoffset: 1; }
+  100% { stroke-dashoffset: 0; }
+}
+@keyframes ico-shackle {
+  55% { transform: rotate(-33deg); }
+  100% { transform: rotate(-27deg); }
+}
+@keyframes ico-paper {
+  from { transform: translateY(-4.5px); opacity: 1; }
+  to { transform: translateY(0); opacity: 1; }
+}
+/* eye movement is saccadic: the hop to each side is quick, the dwell
+   there long, like a glance rather than a sweep */
+@keyframes ico-look {
+  0% { transform: translateX(0); }
+  12%, 40% { transform: translateX(-2.5px); }
+  52%, 80% { transform: translateX(2.5px); }
+  92%, 100% { transform: translateX(0); }
+}
+@keyframes ico-write {
+  0% { transform: translate(0, 0) rotate(0deg); }
+  25% { transform: translate(1px, 0.3px) rotate(-4deg); }
+  50% { transform: translate(2px, -0.2px) rotate(3deg); }
+  75% { transform: translate(3px, 0.3px) rotate(-4deg); }
+  100% { transform: translate(4px, 0) rotate(0deg); }
+}
+/* the printed sheet and the wifi off-slash exist only under a hovered
+   icon (screen and print alike), so they hide outside the media block */
+.i-paper, .i-slash { opacity: 0; }
+@keyframes ico-slash {
+  from { stroke-dashoffset: 1; opacity: 1; }
+  to { stroke-dashoffset: 0; opacity: 1; }
+}
+@keyframes ico-dip {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(0.09rem); }
+}

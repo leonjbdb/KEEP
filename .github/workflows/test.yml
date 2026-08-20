@@ -1,0 +1,18 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # --check also fails the build if the hash in README.md is stale,
+      # so the published hash can never drift from the source
+      - run: node build.mjs --check
+      - run: node --test "test/*.test.mjs"

@@ -1,0 +1,14 @@
+# the built kit is the deliverable — people download that one file and check
+# it against the SHA-256 published in the README, so it belongs in the repo.
+# Everything else that lands in dist/ is scratch.
+dist/*
+!dist/keep.html
+node_modules/
+.e2e-*
+DESIGN-BRIEF.md
+
+# macOS Finder metadata, in every directory it has ever opened
+.DS_Store
+
+# local Claude Code tooling (dev-server launch config)
+.claude/
