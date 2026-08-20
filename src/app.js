@@ -1607,8 +1607,9 @@ function showRecover() {
 }
 
 /** `secretBytes` is owned by this screen: it stays as bytes between reveals
- *  and is zeroed on the way out. Text only exists while the button is held,
- *  which is the one moment the secret has to be readable. */
+ *  and is zeroed on the way out. A one-line secret is only readable while the
+ *  button is held; a multi-line secret toggles open instead, because reading
+ *  it takes scrolling and time a pinned-down pointer does not allow. */
 function showRecovered(secretBytes) {
   // a secret entered in the multi-line box carries its newlines through the
   // ciphertext, so their presence is the stored size hint: line breaks mean
@@ -1629,26 +1630,50 @@ function showRecovered(secretBytes) {
     outBlock = el("div", { class: "scrollhost" }, [out]);
     mountBoxScrollbar(out, outBlock);
   }
-  const hold = el("button", { class: "btn btn-go btn-hold", type: "button" }, [
-    icon("eye"), "HOLD TO REVEAL", el("span", { class: "gocur", text: "_", "aria-hidden": "true" }),
-  ]);
   const show = () => { out.textContent = new TextDecoder().decode(secretBytes); };
   const hide = () => { out.textContent = masked; };
-  hold.addEventListener("pointerdown", (e) => {
-    // capture the pointer: revealing can reflow the page and slide the button
-    // out from under a held pointer, which would otherwise fire pointerleave
-    // and hide the secret mid-hold
-    if (hold.setPointerCapture) {
-      try { hold.setPointerCapture(e.pointerId); } catch { /* mouseless synth event */ }
-    }
-    show();
-  });
-  hold.addEventListener("pointerup", hide);
-  hold.addEventListener("pointercancel", hide);
-  hold.addEventListener("pointerleave", hide);
-  hold.addEventListener("blur", hide);
+  let reveal;
+  let hideNow = hide;
+  if (multiline) {
+    // toggle, not hold: the pane must be free to grow past the viewport and
+    // be scrolled while readable, neither of which a held pointer permits
+    const gocur = el("span", { class: "gocur", text: "_", "aria-hidden": "true" });
+    reveal = el("button", { class: "btn btn-go", type: "button" });
+    let shown = false;
+    const paint = () => {
+      reveal.replaceChildren(icon("eye"), shown ? "HIDE THE SECRET" : "SHOW THE SECRET", gocur);
+    };
+    hideNow = () => { shown = false; out.classList.remove("open"); hide(); paint(); };
+    reveal.addEventListener("click", () => {
+      shown = !shown;
+      // .open lifts the pane's height cap so the whole secret is on the page,
+      // however small the window: the page scrolls, nothing is trapped inside
+      out.classList.toggle("open", shown);
+      if (shown) show(); else hide();
+      paint();
+      if (shown) out.scrollIntoView({ block: "nearest" });
+    });
+    paint();
+  } else {
+    reveal = el("button", { class: "btn btn-go btn-hold", type: "button" }, [
+      icon("eye"), "HOLD TO REVEAL", el("span", { class: "gocur", text: "_", "aria-hidden": "true" }),
+    ]);
+    reveal.addEventListener("pointerdown", (e) => {
+      // capture the pointer: revealing can reflow the page and slide the button
+      // out from under a held pointer, which would otherwise fire pointerleave
+      // and hide the secret mid-hold
+      if (reveal.setPointerCapture) {
+        try { reveal.setPointerCapture(e.pointerId); } catch { /* mouseless synth event */ }
+      }
+      show();
+    });
+    reveal.addEventListener("pointerup", hide);
+    reveal.addEventListener("pointercancel", hide);
+    reveal.addEventListener("pointerleave", hide);
+    reveal.addEventListener("blur", hide);
+  }
   const finish = () => {
-    hide();
+    hideNow();
     secretBytes.fill(0);
     location.reload();
   };
@@ -1660,7 +1685,7 @@ function showRecovered(secretBytes) {
     rule(),
     outBlock,
     note("bad", "Make sure that you are in a secure location before revealing the secret"),
-    el("div", { class: "btnrow start" }, hold),
+    el("div", { class: "btnrow start" }, reveal),
     navRow(el("span"), btn("FINISH", finish, "right"))
   );
 }

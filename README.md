@@ -17,7 +17,7 @@
 `dist/keep.html` — SHA-256
 
 ```
-94fe3c2ce07dcadb4668ab763ea6e7b9fa9bdf77097ffe7cf45f071bbcaa1bf6
+e5feb78bfca8dfb57fe34aaa2e689b2b5f4fcfdc1f7ebc3988ffdac16ec3daa4
 ```
 
 <!-- END BUILD-HASH -->

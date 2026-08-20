@@ -747,6 +747,9 @@ textarea.fieldin.grow { resize: vertical; min-height: 8rem; }
   max-height: 24rem;
   overflow-y: auto;
 }
+/* revealed: the cap comes off so the whole secret sits on the page — small
+   windows scroll the page rather than hiding lines inside the pane */
+.well.secret.prose.open { max-height: none; }
 @media (max-width: 900px) {
   .well { font-size: 0.875rem; padding: 1rem 0.875rem; word-spacing: 0.5rem; }
   .well.key { font-size: 0.9375rem; padding: 1.125rem 1rem; word-spacing: 0.5rem; }
