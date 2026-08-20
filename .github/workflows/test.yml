@@ -12,6 +12,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      # the committed kit must be the exact build the README hash promises;
+      # must run before build.mjs, which rebuilds over dist/keep.html
+      - run: node tools/verify-dist.mjs
       # --check also fails the build if the hash in README.md is stale,
       # so the published hash can never drift from the source
       - run: node build.mjs --check
