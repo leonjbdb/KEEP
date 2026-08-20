@@ -410,6 +410,8 @@ p { margin: 0 0 0.625rem; }
   text-shadow: var(--glow-copy);
 }
 .fine { font-size: 0.78125rem; line-height: 1.6; color: var(--dim); max-width: 64ch; }
+/* footer lines that should run the full column instead of the 64ch measure */
+.fine.wide { max-width: none; }
 .keymeta {
   font-family: var(--mono);
   font-size: 0.78125rem;
@@ -3412,7 +3414,7 @@ function showHome() {
     actionRow("wave", "Run Self-Test",
       "Check this copy runs correctly in your browser", showSelfTest, true),
     hair(),
-    el("p", { class: "fine", text:
+    el("p", { class: "fine wide", text:
       "This blank tool holds no secrets and is safe to pass on. The RECOVERY.html " +
       "it produces is the file to guard." })
   );

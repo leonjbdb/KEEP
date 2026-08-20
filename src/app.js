@@ -936,7 +936,7 @@ function showHome() {
     actionRow("wave", "Run Self-Test",
       "Check this copy runs correctly in your browser", showSelfTest, true),
     hair(),
-    el("p", { class: "fine", text:
+    el("p", { class: "fine wide", text:
       "This blank tool holds no secrets and is safe to pass on. The RECOVERY.html " +
       "it produces is the file to guard." })
   );
