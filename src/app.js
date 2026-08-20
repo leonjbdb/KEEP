@@ -1614,22 +1614,37 @@ function showRecovered(secretBytes) {
   // ciphertext, so their presence is the stored size hint: line breaks mean
   // the big reading pane, their absence the one-line password well
   const multiline = secretBytes.includes(0x0a);
+  // the mask mirrors the line count so revealing barely moves the layout;
+  // the holder has already decrypted, so the shape of the secret is theirs
+  const lineCount = multiline
+    ? secretBytes.reduce((n, b) => n + (b === 0x0a ? 1 : 0), 1)
+    : 1;
+  const masked = Array(lineCount).fill("•".repeat(12)).join("\n");
   const out = el("div", {
     class: multiline ? "well secret prose" : "well secret",
-    text: "•".repeat(12),
+    text: masked,
   });
   let outBlock = out;
   if (multiline) {
     outBlock = el("div", { class: "scrollhost" }, [out]);
     mountBoxScrollbar(out, outBlock);
   }
-  const hold = el("button", { class: "btn btn-go", type: "button" }, [
+  const hold = el("button", { class: "btn btn-go btn-hold", type: "button" }, [
     icon("eye"), "HOLD TO REVEAL", el("span", { class: "gocur", text: "_", "aria-hidden": "true" }),
   ]);
   const show = () => { out.textContent = new TextDecoder().decode(secretBytes); };
-  const hide = () => { out.textContent = "•".repeat(12); };
-  hold.addEventListener("pointerdown", show);
+  const hide = () => { out.textContent = masked; };
+  hold.addEventListener("pointerdown", (e) => {
+    // capture the pointer: revealing can reflow the page and slide the button
+    // out from under a held pointer, which would otherwise fire pointerleave
+    // and hide the secret mid-hold
+    if (hold.setPointerCapture) {
+      try { hold.setPointerCapture(e.pointerId); } catch { /* mouseless synth event */ }
+    }
+    show();
+  });
   hold.addEventListener("pointerup", hide);
+  hold.addEventListener("pointercancel", hide);
   hold.addEventListener("pointerleave", hide);
   hold.addEventListener("blur", hide);
   const finish = () => {
