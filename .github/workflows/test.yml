@@ -8,10 +8,10 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 24
       # the committed kit must be the exact build the README hash promises;
       # must run before build.mjs, which rebuilds over dist/keep.html
       - run: node tools/verify-dist.mjs
