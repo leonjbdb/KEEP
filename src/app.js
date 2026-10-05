@@ -14,10 +14,20 @@
 /* ------------------------------------------------------------------ */
 
 // pristine source snapshot, captured before any UI mutation; used to
-// regenerate personalized copies of this very file
+// regenerate personalized copies of this very file. It holds only what the
+// parser has read by the time this script runs: anything placed after the
+// script never reaches a RECOVERY.html, which is why the licence lives in
+// the header comment. The template is laid out so this equals the file byte
+// for byte (build.mjs lints it, the "Exact Copy" self-test proves it here)
 const SOURCE_SNAPSHOT = "<!DOCTYPE html>\n" + document.documentElement.outerHTML;
 
-const APP_VERSION = "KEEP 1.0";
+const APP_VERSION = "KEEP 1.1.0";
+// the human form of the stamp, for the rail's bottom-left margin; the
+// "KEEP x.y" form above is what other builds' upgrade probes look for
+const APP_VERSION_LABEL = APP_VERSION.replace(/^KEEP /, "Version ");
+// SHA-256 of this blank file with the slot below emptied again, stamped in
+// by build.mjs — the one fact a file can carry about itself
+const BUILD_DIGEST = "@@BUILD_DIGEST@@";
 const appRoot = document.getElementById("app");
 const railRoot = document.getElementById("rail");
 
@@ -68,25 +78,11 @@ function readEmbeddedVaultB64() {
   return text && text !== "null" ? text : null;
 }
 
-const RECOVERY_TITLE = "KEEP — Recovery";
-
-function injectVaultIntoSnapshot(b64) {
-  const re = new RegExp(
-    "(<scr" + 'ipt type="application/json" id="pkr-vault">)[\\s\\S]*?(</scr' + "ipt>)"
-  );
-  if (!re.test(SOURCE_SNAPSHOT)) {
-    throw new Error("internal: vault placeholder not found in source snapshot");
-  }
-  if (!/<title>[^<]*<\/title>/.test(SOURCE_SNAPSHOT)) {
-    throw new Error("internal: title not found in source snapshot");
-  }
-  // the generated kit is opened years later on the recovery path, so it names
-  // itself for that job; rewriting rather than appending keeps this idempotent
-  // when a personalized file regenerates itself during rotation
-  return SOURCE_SNAPSHOT.replace(re, `$1${b64}$2`).replace(
-    /<title>[^<]*<\/title>/,
-    `<title>${RECOVERY_TITLE}</title>`
-  );
+/** The code digest of this very tool: what a kit made here reduces to. */
+let selfDigestPromise = null;
+function selfDigest() {
+  selfDigestPromise ??= codeDigest(SOURCE_SNAPSHOT);
+  return selfDigestPromise;
 }
 
 /* ------------------------------------------------------------------ */
@@ -193,6 +189,29 @@ function groupHex(hex) {
   return hex.replace(/(.{4})/g, "$1 ").trim();
 }
 
+/** "the key" | "any one key" | "all 3 keys" | "any 3 keys" — the count
+ *  phrase for a k-of-n scheme, kept grammatical down to 1-of-1. */
+function keyCountPhrase(k, n) {
+  if (k === 1) return n === 1 ? "the key" : "any one key";
+  return k === n ? `all ${k} keys` : `any ${k} keys`;
+}
+
+/** The stat-grid / letter form of the scheme: "3 of 5 keys + owner's key". */
+function schemeLabel(k, n, ownerSeparate) {
+  return `${k} of ${n} ${n === 1 ? "key" : "keys"}${ownerSeparate ? " + owner's key" : ""}`;
+}
+
+/** The verify screens' wrong-set diagnosis, built fresh per call — a
+ *  shared <br> node would be moved between notes, not copied. */
+function wrongSetMessage(typedSetHex, kitSetHex) {
+  return [
+    `You have filled in a key from key set ${typedSetHex}. ` +
+    `Please use the key for this key set: ${kitSetHex}`,
+    el("br"),
+    "Did you copy a sheet from another run?",
+  ];
+}
+
 function nowSeconds() {
   return Math.floor(Date.now() / 1000);
 }
@@ -245,15 +264,20 @@ function cutKey(total, needed) {
   }));
 }
 
-function markMarkup(total, needed) {
+/** The bow (the circle — the part of a key that stays in your hand) reads
+ *  like the teeth do: dimmed like a spare while the owner's key half sits
+ *  buried inside the kit file, full amber once it is a separate owner's key
+ *  the owner actually holds. */
+function markMarkup(total, needed, ownerSeparate = false) {
   const teeth = cutKey(total, needed);
   const width = Math.round((9.6 + total * 2.95 - 1.2) * (42 / 23.15));
   const box = "0.75 0 " + (9.6 + total * 2.95 - 0.75 - 0.45).toFixed(2) + " 24";
   const bowDx = (-5.4 - markSpread(total)).toFixed(2) + "px";
+  const bowOp = ownerSeparate ? 1 : 0.28;
   let out =
     '<svg class="kmark" width="' + width + '" height="42" viewBox="' + box + '" aria-hidden="true">' +
     '<g class="kp" style="--dx:' + bowDx + ';--ed:0ms;--rd:' + total * 18 + 'ms">' +
-    '<circle class="kb" cx="4.4" cy="10" r="3" fill="none" stroke="#ffb000" stroke-width="2.6"></circle>' +
+    '<circle class="kb" cx="4.4" cy="10" r="3" fill="none" stroke="#ffb000" stroke-width="2.6" opacity="' + bowOp + '"></circle>' +
     "</g><g fill=\"#ffb000\">";
   for (const t of teeth) {
     out +=
@@ -312,6 +336,7 @@ function wireMark(mark) {
 
 let MARK_N = 5;
 let MARK_K = 3;
+let MARK_OWNER = false; // owner's key outside the file -> orange bow on the mark
 
 /**
  * The rail has two moods: during the ceremony it is a numbered progress
@@ -342,8 +367,11 @@ function renderRail(spec = {}) {
   }
 
   const wrap = el("div", { class: "markwrap" });
-  wrap.innerHTML = markMarkup(MARK_N, MARK_K);
+  wrap.innerHTML = markMarkup(MARK_N, MARK_K, MARK_OWNER);
   inner.append(wrap);
+  // the build's version, stamped in the bottom-left margin under the key
+  // mark: every screen names the tool that produced it
+  inner.append(el("div", { class: "railver", text: APP_VERSION_LABEL }));
   railRoot.replaceChildren(inner);
   wireMark(wrap.querySelector(".kmark"));
 }
@@ -778,11 +806,11 @@ function keyEntryPanel(vault, count, onChange, placeholder = "Type a key here") 
   });
   let generation = 0;
 
-  function paint(slot, kind, text) {
+  function paint(slot, kind, content) {
     slot.noteBox.className = `note note-${kind}`;
     slot.noteBox.replaceChildren(
       ...(kind === "blank" ? [] : [icon(NOTE_ICON[kind])]),
-      el("span", { text })
+      el("span", {}, [].concat(content))
     );
     slot.input.classList.toggle("is-ok", kind === "ok");
     slot.input.classList.toggle("is-bad", kind === "bad");
@@ -797,12 +825,20 @@ function keyEntryPanel(vault, count, onChange, placeholder = "Type a key here") 
         results.push({ decoded: null, error: null });
         continue;
       }
+      let dec = null;
       try {
-        const dec = decodeCard(typed);
+        dec = decodeCard(typed);
         await checkCard(vault, dec, 1);
         results.push({ decoded: dec, error: null });
       } catch (err) {
-        results.push({ decoded: null, error: err.message });
+        // the note sits under its own field, so a wrong set gets the
+        // full diagnosis rather than the slot-numbered error text
+        results.push({
+          decoded: null,
+          error: err.code === "SET_MISMATCH" && dec
+            ? wrongSetMessage(toHex(dec.setId).toUpperCase(), vault.setIdHex)
+            : err.message,
+        });
       }
     }
     if (gen !== generation) return; // superseded by newer input
@@ -835,6 +871,80 @@ function keyEntryPanel(vault, count, onChange, placeholder = "Type a key here") 
     clear: () => {
       for (const s of slots) { s.input.value = ""; s.ok = false; s.decoded = null; paint(s, "blank", ""); }
     },
+  };
+}
+
+/**
+ * Live-validated owner's key entry for a v2 kit: checksum, set and
+ * commitment checked on every keystroke, like keyEntryPanel does for the
+ * holders' keys. For a v1 kit it degenerates to an empty panel that is
+ * always satisfied, so callers can wire it unconditionally.
+ */
+function ownerEntryPanel(vault, onChange) {
+  if (!vault.needsOwnerKey) {
+    return { fields: [], ok: () => true, decoded: () => null, clear: () => {} };
+  }
+  const id = uid("owner");
+  const input = el("textarea", {
+    id,
+    class: "fieldin", rows: "3", placeholder: "Type the owner's key here",
+    autocomplete: "off", spellcheck: "false", autocapitalize: "none",
+  });
+  const noteBox = note("blank", "");
+  let decoded = null;
+  let okFlag = false;
+  let generation = 0;
+
+  function paint(kind, content) {
+    noteBox.className = `note note-${kind}`;
+    noteBox.replaceChildren(
+      ...(kind === "blank" ? [] : [icon(NOTE_ICON[kind])]),
+      el("span", {}, [].concat(content))
+    );
+    input.classList.toggle("is-ok", kind === "ok");
+    input.classList.toggle("is-bad", kind === "bad");
+  }
+
+  async function validate() {
+    const gen = ++generation;
+    const typed = normalizeCardInput(input.value);
+    decoded = null;
+    okFlag = false;
+    if (typed.length < OWNER_KEY_LENGTH) {
+      paint("blank", "");
+      onChange();
+      return;
+    }
+    let dec = null;
+    try {
+      dec = decodeOwnerKey(typed);
+      await checkOwnerKey(vault, dec);
+      if (gen !== generation) return; // superseded by newer input
+      decoded = dec;
+      okFlag = true;
+      paint("ok", "Owner's key verified");
+    } catch (err) {
+      if (gen !== generation) return;
+      // a wrong set gets the full diagnosis, same as the verify screens
+      paint("bad", err.code === "OWNER_SET_MISMATCH" && dec
+        ? wrongSetMessage(toHex(dec.setId).toUpperCase(), vault.setIdHex)
+        : err.message);
+    }
+    onChange();
+  }
+  input.addEventListener("input", validate);
+
+  return {
+    // the owner's key leads the entry screens; the trailing divider is
+    // part of the panel so a v1 kit (empty panel) leaves no stray rule
+    fields: [el("div", { class: "field" }, [
+      el("label", { class: "flabel", for: id, text: "OWNER'S KEY" }),
+      input,
+      noteBox,
+    ]), el("div", { class: "hair spaced" })],
+    ok: () => okFlag,
+    decoded: () => decoded,
+    clear: () => { input.value = ""; decoded = null; okFlag = false; paint("blank", ""); },
   };
 }
 
@@ -908,6 +1018,7 @@ function showHome() {
   CEREMONY_LIVE = false;
   MARK_N = 5;
   MARK_K = 3;
+  MARK_OWNER = false;
 
   if (VAULT_LOAD_ERROR) {
     return render({ page: "Home" },
@@ -930,6 +1041,12 @@ function showHome() {
     actionRow("pen", "Create a Recovery Kit",
       "Encrypt your secret into multiple secure parts", showCreateWizard, true),
     hair(),
+    actionRow("shield", "Verify a Recovery Kit",
+      "Check which version of KEEP made a RECOVERY.html, and that its code is genuine", showVerify, true),
+    hair(),
+    actionRow("rotate", "Upgrade a Recovery Kit",
+      "Carry an existing RECOVERY.html over to this version of the tool", showUpgrade, true),
+    hair(),
     actionRow("printer", "Print Instructions",
       "Print the key holder's instructions", () => showLetter(null, showHome), true),
     hair(),
@@ -938,7 +1055,7 @@ function showHome() {
     hair(),
     el("p", { class: "fine wide", text:
       "This blank tool holds no secrets and is safe to pass on. The RECOVERY.html " +
-      "it produces is the file to guard." })
+      "or owner's key it produces is the file to guard." })
   );
   if (!matchMedia("(prefers-reduced-motion: reduce)").matches) typeInto(typed, cursor);
   else typed.textContent = HOME_LINES[0];
@@ -948,6 +1065,7 @@ function showRecoveryHome() {
   const v = PARSED_VAULT;
   MARK_N = v.n;
   MARK_K = v.k;
+  MARK_OWNER = v.needsOwnerKey;
   const hashBox = well("", "");
   const copyBtn = btn("COPY", () => {}, "btn-small");
   const saveBtn = btn("SAVE FILE HASH", () => {}, "btn-small");
@@ -967,12 +1085,13 @@ function showRecoveryHome() {
     statGrid([
       ["KIT FINGERPRINT", v.fingerprint],
       ["KEY SET", v.setIdHex],
-      ["SCHEME", `${v.k} of ${v.n} keys`],
+      ["SCHEME", schemeLabel(v.k, v.n, v.needsOwnerKey)],
       ["CREATED", fmtDate(v.createdAt)],
     ]),
     rule(),
     actionRow("unlock", "Recover the Secret",
-      `Enter any ${v.k} keys to reveal the protected secret`, showRecover),
+      `Enter ${keyCountPhrase(v.k, v.n)}${v.needsOwnerKey ? " and the owner's key" : ""} ` +
+      "to reveal the protected secret", showRecover),
     hair(),
     actionRow("shield", "Check this Kit",
       "Compare the fingerprint against the instruction letter", showCheckKit),
@@ -1006,7 +1125,7 @@ function hashHelpNote() {
 /** SHA-256 of this file as it stands: the snapshot with its own vault. */
 async function fileHash() {
   const b64 = readEmbeddedVaultB64();
-  const source = b64 === null ? SOURCE_SNAPSHOT : injectVaultIntoSnapshot(b64);
+  const source = b64 === null ? SOURCE_SNAPSHOT : withVault(SOURCE_SNAPSHOT, b64);
   return toHex(await sha256(new TextEncoder().encode(source)));
 }
 
@@ -1025,8 +1144,60 @@ async function copyToClipboard(text, button, idleLabel, doneLabel) {
 /* self-test view                                                      */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Does this page's copy of itself reproduce the file as it was built? The
+ * build stamped BUILD_DIGEST over the blank file with that slot empty: empty
+ * it again in the snapshot, and only an exact copy hashes back to the stamp.
+ * Every kit is written from the snapshot, so this is what makes a kit
+ * written here verifiable later. Resolves to null, or to what is wrong.
+ */
+let exactCopyPromise = null;
+function exactCopyProblem() {
+  exactCopyPromise ??= (async () => {
+    const unstamped = blankForm(SOURCE_SNAPSHOT)
+      .replace(`"${BUILD_DIGEST}"`, () => '"@@BUILD' + '_DIGEST@@"');
+    const digest = toHex(await sha256(new TextEncoder().encode(unstamped)));
+    return digest === BUILD_DIGEST
+      ? null
+      : "This copy of the tool does not reproduce the file it was built as: either the " +
+        "file was changed, or this browser copies it differently.";
+  })();
+  return exactCopyPromise;
+}
+
+/**
+ * For every screen that writes a kit file: empty unless the kit written
+ * here could not be verified later, then a warning. Writing is not
+ * blocked — such a kit still recovers; only checking it against the
+ * published hash would fail.
+ */
+function exactCopyWarning() {
+  const holder = el("div", {});
+  exactCopyProblem().then((problem) => {
+    if (!problem) return;
+    holder.replaceChildren(note("bad",
+      el("strong", { text: "A kit written here cannot be verified later. " }),
+      problem + " The kit would still recover the secret, but checking it against the " +
+      "published hash would fail. Use another browser, or a verified copy of the tool."));
+  });
+  return holder;
+}
+
+/** Checks only a page can run, appended to the built-in self-test. */
+const APP_CHECKS = [
+  {
+    name: "Exact Copy of This File",
+    detail: "Kits written here match the published tool byte for byte, so they can be verified",
+    async run() {
+      const problem = await exactCopyProblem();
+      if (problem) throw new Error(problem + " Kits written here could not be verified.");
+    },
+  },
+];
+
 function showSelfTest() {
-  const rows = SELF_TEST_CHECKS.map((c, i) => {
+  const checks = [...SELF_TEST_CHECKS, ...APP_CHECKS.map(({ name, detail }) => ({ name, detail }))];
+  const rows = checks.map((c, i) => {
     const status = el("span", { class: "s wait", text: "[ ---- ]" });
     const ms = el("span", { class: "ms" });
     return {
@@ -1081,7 +1252,7 @@ function showSelfTest() {
       }
       // let the browser paint between checks
       return new Promise((res2) => setTimeout(res2, 30));
-    });
+    }, APP_CHECKS);
     const allOk = results.every((r) => r.ok);
     headline.textContent = allOk
       ? `ALL ${rows.length} CHECKS PASSED`
@@ -1091,7 +1262,8 @@ function showSelfTest() {
     result.replaceChildren(icon(allOk ? "check" : "warning"), el("span", { text: allOk
       ? "This copy behaves correctly. Nothing you type is stored or sent anywhere."
       : results.filter((r) => !r.ok).map((r) => `${r.name}: ${r.error}`).join(" · ") +
-        " — don't trust this copy. Use the other USB stick, or the instructions in the technical folder." }));
+        " — don't trust this copy. Use the other USB stick, or open this file in a text editor " +
+        "and search for MANUAL RECOVERY." }));
     runBtn.firstChild.textContent = "RUN AGAIN";
     setEnabled(runBtn, true);
   }
@@ -1125,13 +1297,15 @@ function showCreateWizard() {
   const ceremony = {
     k: 3,
     n: 5,
+    ownerExternal: false,
     pwHash: null,
     saved: 0,
-    result: null, // { bytes, cards, setIdHex, fingerprint, ... }
+    result: null, // { bytes, cards, ownerKey, setIdHex, fingerprint, ... }
     cardStep: 0,
   };
   MARK_N = ceremony.n;
   MARK_K = ceremony.k;
+  MARK_OWNER = false;
 
   stepPrecautions();
 
@@ -1162,6 +1336,7 @@ function showCreateWizard() {
       lead("Three optional precautions worth taking, to reduce the chance of your " +
         "secret getting leaked."),
       rule(),
+      exactCopyWarning(),
       ...items.flatMap((row) => [row, hair()]),
       navRow(btn("CANCEL", showHome), goBtn("CONTINUE", stepParams))
     );
@@ -1195,19 +1370,25 @@ function showCreateWizard() {
     const totalLabelId = uid("flabel");
     const needLabelId = uid("flabel");
 
+    // a separate owner's key is itself a required factor, so the holders'
+    // side may shrink to a single key; with K_app in the file, 2-of-2 is
+    // the floor (one key alone must never open a stray file copy)
+    const minN = () => (ceremony.ownerExternal ? 1 : MIN_CARDS);
+    const minK = () => (ceremony.ownerExternal ? 1 : 2);
+
     const totalStepper = stepperFor(
       () => ceremony.n,
       (v) => {
-        ceremony.n = Math.max(MIN_CARDS, Math.min(MAX_CARDS, v));
+        ceremony.n = Math.max(minN(), Math.min(MAX_CARDS, v));
         ceremony.k = Math.min(ceremony.k, ceremony.n);
       },
-      () => MIN_CARDS, () => MAX_CARDS,
+      minN, () => MAX_CARDS,
       totalLabelId, "total number of keys to generate"
     );
     const needStepper = stepperFor(
       () => ceremony.k,
-      (v) => { ceremony.k = Math.max(2, Math.min(ceremony.n, v)); },
-      () => 2, () => ceremony.n,
+      (v) => { ceremony.k = Math.max(minK(), Math.min(ceremony.n, v)); },
+      minK, () => ceremony.n,
       needLabelId, "recovery threshold"
     );
 
@@ -1220,27 +1401,84 @@ function showCreateWizard() {
       const spare = ceremony.n - ceremony.k;
       let kind = "info";
       let text;
-      if (spare === 0) {
+      if (ceremony.n === 1) {
+        kind = "bad";
+        text = "A single key. Losing it makes recovery impossible.";
+      } else if (spare === 0) {
         kind = "bad";
         text = "Every single key is required. Losing one key makes recovery impossible.";
-      } else if (ceremony.k === 2) {
+      } else if (ceremony.k === 2 && !ceremony.ownerExternal) {
+        // with a separate owner's key the holders can never act alone,
+        // so a low threshold stops being a collusion risk
         kind = "bad";
         text = "Any two holders together (plus your kit file) can recover. " +
           "Consider a higher threshold.";
       } else {
-        text = `Any ${ceremony.k} of the ${ceremony.n} keys will recover; ` +
+        text = `Any ${ceremony.k === 1 ? "one" : ceremony.k} of the ${ceremony.n} keys will recover; ` +
           `up to ${spare} ${spare === 1 ? "key" : "keys"} may be lost.`;
       }
       noteBox.className = `note note-${kind}`;
       noteBox.replaceChildren(icon(NOTE_ICON[kind]), el("span", { text }));
     }
 
+    // one half of the encryption key always stays with you rather than the
+    // holders; this choice is only about WHERE it lives — inside the kit
+    // file (standard), or on a separate owner's key the ceremony adds
+    const ownerLabelId = uid("flabel");
+    const noteIn = note("info",
+      "Your half of the decryption key is baked into the kit. Decrypting it " +
+      "requires only the keys below. You need to keep the recovery file safe and " +
+      "secure, yet accessible if anything were to happen to you.");
+    const noteSep = note("bad",
+      "You get an additional key that is REQUIRED for decryption. Losing this key " +
+      "makes recovery impossible. The recovery file requires your key as well as " +
+      "the keys below. You can share the recovery file, but keep your key safe and " +
+      "secure, yet accessible if anything were to happen to you.");
+    // both notes share one grid cell, so the taller one reserves the room
+    // and toggling never pushes the divider below
+    const ownerNotes = el("div", { class: "notestack" }, [noteIn, noteSep]);
+    const tabInFile = el("button", { class: "tab", type: "button", text: "INSIDE THE KIT" });
+    // the warn palette: selecting it is the choice that can lose the secret
+    const tabSeparate = el("button", { class: "tab warn", type: "button", text: "SEPARATE OWNER'S KEY" });
+    const ownerTabs = el("div", { class: "tabs", role: "group", "aria-labelledby": ownerLabelId },
+      [tabInFile, tabSeparate]);
+
+    function paintOwner() {
+      const sep = ceremony.ownerExternal;
+      tabInFile.className = sep ? "tab" : "tab on";
+      tabSeparate.className = sep ? "tab warn on" : "tab warn";
+      tabInFile.setAttribute("aria-pressed", String(!sep));
+      tabSeparate.setAttribute("aria-pressed", String(sep));
+      noteIn.classList.toggle("ghost", sep);
+      noteSep.classList.toggle("ghost", !sep);
+      // the mark answers the choice live: bright bow = the owner's part
+      // of the key leaves the file
+      MARK_OWNER = sep;
+      // switching back to in-file restores the 2-of-2 floor
+      ceremony.n = Math.max(minN(), ceremony.n);
+      ceremony.k = Math.max(minK(), Math.min(ceremony.k, ceremony.n));
+      syncAll();
+    }
+    tabInFile.addEventListener("click", () => { ceremony.ownerExternal = false; paintOwner(); });
+    tabSeparate.addEventListener("click", () => { ceremony.ownerExternal = true; paintOwner(); });
+    paintOwner();
+
     render(ceremonyRail(2),
       title("HOW MANY KEYS WOULD YOU LIKE?"),
       rule(),
       el("div", { class: "field" }, [
+        el("span", { class: "flabel", id: ownerLabelId, text: "YOUR HALF OF THE KEY" }),
+        el("p", { class: "fhint",
+          text: "Half the encryption key never leaves you. Choose where it lives" }),
+        ownerTabs,
+        // inside the field, straight after the tabs: the notes answer the
+        // choice, so they sit flush against it (.tabs + .notestack)
+        ownerNotes,
+      ]),
+      el("div", { class: "hair spaced" }),
+      el("div", { class: "field" }, [
         el("span", { class: "flabel", id: totalLabelId,
-          text: "TOTAL NUMBER OF KEYS TO GENERATE" }),
+          text: "TOTAL NUMBER OF HOLDER'S KEYS TO GENERATE" }),
         el("p", { class: "fhint", text: "A person should only hold one key" }),
         totalStepper.box,
       ]),
@@ -1249,7 +1487,6 @@ function showCreateWizard() {
         el("p", { class: "fhint", text: "Amount of keys required to decrypt the secret" }),
         needStepper.box,
       ]),
-      hair(),
       noteBox,
       navRow(btn("BACK", stepPrecautions), goBtn("CONTINUE", stepSecret))
     );
@@ -1326,11 +1563,9 @@ function showCreateWizard() {
   async function stepGenerate(secret) {
     CEREMONY_LIVE = true;
     const fill = el("div", { class: "fill" });
+    // the bar stands alone, centred: no heading, lead or rule — the rail
+    // still says where in the ceremony this is
     render(ceremonyRail(3),
-      title("ENTER THE SECRET"),
-      lead("The secret is never saved unencrypted. It is held only for the moment it " +
-        "takes to encrypt it into the kit file."),
-      rule(),
       el("div", { class: "busybox" }, el("div", { class: "progress" }, [
         fill,
         el("div", { class: "cap" }, ["GENERATING", el("span", { class: "cur", text: "_", "aria-hidden": "true" })]),
@@ -1344,9 +1579,11 @@ function showCreateWizard() {
       pct = Math.min(92, pct + 7);
       fill.style.width = `${pct}%`;
     }, 90);
+    const shownAt = Date.now();
     try {
       ceremony.result = await createVault(
-        secret, ceremony.k, ceremony.n, randomBytes, nowSeconds()
+        secret, ceremony.k, ceremony.n, randomBytes, nowSeconds(),
+        { separateOwnerKey: ceremony.ownerExternal }
       );
     } catch (err) {
       clearInterval(creep);
@@ -1357,14 +1594,28 @@ function showCreateWizard() {
         navRow(btn("BACK", stepSecret))
       );
     }
-    clearInterval(creep);
-    fill.style.width = "100%";
-    ceremony.cardStep = 0;
-    viewTimeout(stepKeyShow, 320);
+    // the work itself is near-instant, which on screen reads as a glitch
+    // rather than a step: keep the bar creeping for at least a second
+    // before it lands, purely for presentation
+    const MIN_BAR_MS = 1_000;
+    viewTimeout(() => {
+      clearInterval(creep);
+      fill.style.width = "100%";
+      ceremony.cardStep = 0;
+      // the owner's key leads the sequence, as it does on the entry screens
+      viewTimeout(ceremony.result.ownerKey ? stepOwnerShow : stepKeyShow, 320);
+    }, Math.max(0, MIN_BAR_MS - (Date.now() - shownAt)));
+  }
+
+  /** The owner's key counts as just another key in the progress rail:
+   *  a v2 run shows n+1 steps, with the owner's key as the first one. */
+  function keyStepTotal() {
+    return ceremony.result.ownerKey ? ceremony.n + 1 : ceremony.n;
   }
 
   function keyRail() {
-    return ceremonyRail(4, `04 KEYS ${ceremony.cardStep + 1}/${ceremony.n}`);
+    const step = ceremony.cardStep + (ceremony.result.ownerKey ? 2 : 1);
+    return ceremonyRail(4, `04 KEYS ${step}/${keyStepTotal()}`);
   }
 
   function stepKeyShow() {
@@ -1382,9 +1633,13 @@ function showCreateWizard() {
         "Capital letters and digits only. After the PSR1 prefix, the characters 1, b, i and o never appear. A round character is always the digit 0."),
       navRow(
         btn("BACK", () => {
-          // back past the first key is a way out of the ceremony, not a step:
-          // it costs the keys and the secret, so it asks the same question
-          if (i === 0) return confirmLeaveCeremony();
+          // back past the first holder's key returns to the owner's key
+          // when there is one; otherwise it is a way out of the ceremony,
+          // not a step: it costs the keys and the secret, so it asks
+          if (i === 0) {
+            if (r.ownerKey) return stepOwnerShow();
+            return confirmLeaveCeremony();
+          }
           ceremony.cardStep -= 1;
           stepKeyShow();
         }),
@@ -1410,11 +1665,13 @@ function showCreateWizard() {
       else stepProof();
     }, false);
 
-    function paint(kind, text) {
+    // `content` may be a string or an array of nodes (the wrong-set
+    // diagnosis carries a line break)
+    function paint(kind, content) {
       noteBox.className = `note note-${kind}`;
       noteBox.replaceChildren(
         ...(kind === "blank" ? [] : [icon(NOTE_ICON[kind])]),
-        el("span", { text })
+        el("span", {}, [].concat(content))
       );
       input.classList.toggle("is-ok", kind === "ok");
       input.classList.toggle("is-bad", kind === "bad");
@@ -1435,7 +1692,7 @@ function showCreateWizard() {
         // index, and the index diagnosis only means anything within this set
         const decSetHex = toHex(dec.setId).toUpperCase();
         if (decSetHex !== r.setIdHex) {
-          paint("bad", `This key is from a different key set (set ${decSetHex} — this kit is set ${r.setIdHex}). Did you copy a sheet from another run?`);
+          paint("bad", wrongSetMessage(decSetHex, r.setIdHex));
         } else if (dec.index !== i + 1) {
           paint("bad", `This reads as key ${dec.index}, not key ${i + 1}. Did you copy the wrong sheet?`);
         } else {
@@ -1458,22 +1715,114 @@ function showCreateWizard() {
     );
   }
 
+  function ownerRail() {
+    return ceremonyRail(4, `04 KEYS 1/${keyStepTotal()}`);
+  }
+
+  function stepOwnerShow() {
+    const r = ceremony.result;
+    render(ownerRail(),
+      title("YOUR KEY"),
+      lead("This key is yours alone. Recovery needs it together with the kit file " +
+        "and the holders' keys. Write it down or store it in your password manager, " +
+        "in a different place than the kit file. Never give it to a key holder."),
+      el("p", { class: "keymeta", text:
+        `Owner's key · set ${r.setIdHex} · created ${fmtDate(r.createdAt)}` }),
+      rule(),
+      well(formatCardForDisplay(r.ownerKey), "key"),
+      note("bad",
+        "If this key is lost, the secret is unrecoverable. No number of key holders can " +
+        "replace it."),
+      note("info",
+        "Capital letters and digits only. After the KEEP1 prefix, the characters 1, b, i and o never appear. A round character is always the digit 0."),
+      navRow(
+        // the owner's key opens the sequence, so back past it is the way
+        // out of the ceremony — same question, same cost
+        btn("BACK", confirmLeaveCeremony),
+        goBtn("VERIFY", stepOwnerVerify)
+      )
+    );
+  }
+
+  function stepOwnerVerify() {
+    const r = ceremony.result;
+    const input = el("textarea", {
+      class: "fieldin", rows: "4", placeholder: "Type the owner's key back here",
+      "aria-label": "Owner's key",
+      autocomplete: "off", spellcheck: "false", autocapitalize: "none",
+    });
+    const noteBox = note("blank", "");
+    const cont = goBtn("CONTINUE", () => {
+      ceremony.cardStep = 0;
+      stepKeyShow();
+    }, false);
+
+    function paint(kind, content) {
+      noteBox.className = `note note-${kind}`;
+      noteBox.replaceChildren(
+        ...(kind === "blank" ? [] : [icon(NOTE_ICON[kind])]),
+        el("span", {}, [].concat(content))
+      );
+      input.classList.toggle("is-ok", kind === "ok");
+      input.classList.toggle("is-bad", kind === "bad");
+    }
+
+    input.addEventListener("input", () => {
+      const typed = normalizeCardInput(input.value);
+      setEnabled(cont, false);
+      if (typed === r.ownerKey) {
+        paint("ok", "Your key is verified");
+        setEnabled(cont, true);
+        return;
+      }
+      if (typed.length < OWNER_KEY_LENGTH) { paint("blank", ""); return; }
+      try {
+        // same diagnosis ladder as the holders' keys: a wrong set is
+        // named before falling back to the generic typo advice
+        const dec = decodeOwnerKey(typed);
+        const decSetHex = toHex(dec.setId).toUpperCase();
+        if (decSetHex !== r.setIdHex) {
+          paint("bad", wrongSetMessage(decSetHex, r.setIdHex));
+        } else {
+          paint("bad", "Valid-looking code, but it is not this owner's key. Check your writing character by character.");
+        }
+      } catch (err) {
+        // a holder's key pasted here decodes as the wrong kind — that
+        // diagnosis (BAD_HRP) beats the generic typo advice
+        paint("bad", err instanceof CardError && err.code !== "BAD_HRP" && typed.length === OWNER_KEY_LENGTH
+          ? "There is a mistake somewhere. Compare your writing character by character."
+          : err.message);
+      }
+    });
+
+    render(ownerRail(),
+      title("VERIFY YOUR KEY"),
+      lead("Write the key exactly as you have written it down or stored it."),
+      rule(),
+      input,
+      noteBox,
+      navRow(btn("SHOW THE CODE", stepOwnerShow), cont)
+    );
+  }
+
   async function stepProof() {
     const r = ceremony.result;
     const vault = await parseVault(r.bytes);
     const resultBox = note("blank", "");
     let tested = false;
     const go = goBtn("TEST THE RECOVERY", () => runTest(), false);
-    const panel = keyEntryPanel(vault, r.k, () => {
-      if (!tested) setEnabled(go, panel.allValid());
-    });
+    const sync = () => {
+      if (!tested) setEnabled(go, panel.allValid() && owner.ok());
+    };
+    const panel = keyEntryPanel(vault, r.k, sync);
+    const owner = ownerEntryPanel(vault, sync);
 
     async function runTest() {
       if (tested) return stepSave();
       try {
         // the proof only needs to know the bytes come back identical, so
         // they are hashed and wiped without ever becoming text
-        const recovered = await recoverPasswordBytes(vault, panel.decoded());
+        const recovered = await recoverPasswordBytes(vault, panel.decoded(), owner.decoded());
         const hash = toHex(await sha256(recovered));
         recovered.fill(0);
         if (hash !== ceremony.pwHash) {
@@ -1493,14 +1842,26 @@ function showCreateWizard() {
       }
     }
 
+    const withOwner = r.ownerKey ? ", together with your owner's key." : ".";
+    const proofLead = r.k === r.n
+      ? (r.k === 1 ? "Fill in the key below" : `Fill in ${r.k} keys below`) + withOwner
+      : (r.k === 1
+        ? "Pick any one key and fill it in below"
+        : `Pick any ${r.k} keys at random and fill them in below`) + withOwner;
+
     render(ceremonyRail(5),
       title("TEST YOUR KEYS"),
-      lead(`Pick any ${r.k} keys at random, then fill them in below.`),
+      lead(proofLead),
       rule(),
+      ...owner.fields,
       ...panel.fields,
       resultBox,
       navRow(
-        btn("RESTART FROM KEY 1", () => { ceremony.cardStep = 0; stepKeyShow(); }),
+        btn(r.ownerKey ? "RESTART FROM YOUR KEY" : "RESTART FROM KEY 1", () => {
+          ceremony.cardStep = 0;
+          if (r.ownerKey) stepOwnerShow();
+          else stepKeyShow();
+        }),
         go
       )
     );
@@ -1508,7 +1869,7 @@ function showCreateWizard() {
 
   async function stepSave() {
     const r = ceremony.result;
-    const personalized = injectVaultIntoSnapshot(toBase64(r.bytes));
+    const personalized = withVault(SOURCE_SNAPSHOT, toBase64(r.bytes));
     // hash of the exact bytes being saved: lets the owner detect ANY
     // later modification of the file (app code included), using the
     // OS hashing tool — see the letter and hashHelpNote()
@@ -1552,9 +1913,18 @@ function showCreateWizard() {
       statGrid([
         ["KIT FINGERPRINT", r.fingerprint],
         ["KEY SET", r.setIdHex],
-        ["SCHEME", `${r.k} of ${r.n} keys`],
+        ["SCHEME", schemeLabel(r.k, r.n, Boolean(r.ownerKey))],
         ["CREATED", fmtDate(r.createdAt)],
       ]),
+      r.ownerKey
+        ? note("bad", "This kit does not contain the owner's key: recovery needs the " +
+          "file, the owner's key and the holders' keys. Keep the owner's key apart " +
+          "from the recovery file if you are to share the recovery file.")
+        : null,
+      note("info", "Tip: if you keep a password vault, consider storing a copy of the " +
+        "holders' keys in it. Testing the recovery and changing the secret then needs " +
+        "no key holders. It is paramount that these copies are stored safely, and " +
+        "never together with the recovery file itself."),
       rule(),
       el("div", { class: "btnrow start" }, [
         saveBtn,
@@ -1582,24 +1952,29 @@ function showRecover() {
   const statusBox = note("blank", "");
   const go = goBtn("RECOVER THE SECRET", async () => {
     try {
-      const recovered = await recoverPasswordBytes(v, panel.decoded());
+      const recovered = await recoverPasswordBytes(v, panel.decoded(), owner.decoded());
       panel.clear();
+      owner.clear();
       showRecovered(recovered);
     } catch (err) {
       statusBox.className = "note note-bad";
       statusBox.replaceChildren(icon("warning"), el("span", { text: err.message }));
     }
   }, false);
-  const panel = keyEntryPanel(v, v.k, () => setEnabled(go, panel.allValid()));
+  const sync = () => setEnabled(go, panel.allValid() && owner.ok());
+  const panel = keyEntryPanel(v, v.k, sync);
+  const owner = ownerEntryPanel(v, sync);
 
   render(kitRail("RECOVER SECRET"),
     title("RECOVER THE SECRET"),
     el("p", { class: "lead" }, [
-      `Enter any ${v.k} different keys from set `,
+      `Enter ${keyCountPhrase(v.k, v.n)} from set `,
       el("strong", { text: v.setIdHex }),
+      v.needsOwnerKey ? ", together with the owner's key (KEEP1…)" : "",
       ". Type each code exactly as written; spaces do not matter.",
     ]),
     rule(),
+    ...owner.fields,
     ...panel.fields,
     statusBox,
     navRow(btn("BACK", showHome), go)
@@ -1703,7 +2078,7 @@ function showCheckKit() {
     statGrid([
       ["KIT FINGERPRINT", v.fingerprint],
       ["KEY SET", v.setIdHex],
-      ["SCHEME", `${v.k} of ${v.n} keys`],
+      ["SCHEME", schemeLabel(v.k, v.n, v.needsOwnerKey)],
       ["CREATED", fmtDate(v.createdAt)],
       ["TOOL VERSION", APP_VERSION],
     ]),
@@ -1722,6 +2097,7 @@ function showRotate() {
   const statusBox = note("blank", "");
   const go = goBtn("RE-ENCRYPT THE KIT", () => rotate(), false);
   const panel = keyEntryPanel(v, v.k, sync, "Type the key back here");
+  const owner = ownerEntryPanel(v, sync);
 
   function matched() {
     return !pair.first.isEmpty() && pair.first.matches(pair.again);
@@ -1749,7 +2125,7 @@ function showRotate() {
       ...(kind === "blank" ? [] : [icon(NOTE_ICON[kind])]),
       el("span", { text })
     );
-    setEnabled(go, panel.allValid() && matched() && kind !== "bad");
+    setEnabled(go, panel.allValid() && owner.ok() && matched() && kind !== "bad");
   }
   pair = secretPair("NEW SECRET", "REPEAT NEW SECRET", sync);
   sync();
@@ -1757,11 +2133,12 @@ function showRotate() {
   async function rotate() {
     try {
       // bytes, not a string, and rotateVault zeroes them once encrypted
-      const rotated = await rotateVault(v, panel.decoded(), pair.first.bytes(), randomBytes, nowSeconds());
+      const rotated = await rotateVault(v, panel.decoded(), pair.first.bytes(), randomBytes, nowSeconds(), owner.decoded());
       pair.first.clear();
       pair.again.clear();
       panel.clear();
-      const personalized = injectVaultIntoSnapshot(toBase64(rotated.bytes));
+      owner.clear();
+      const personalized = withVault(SOURCE_SNAPSHOT, toBase64(rotated.bytes));
       const hashHex = toHex(await sha256(new TextEncoder().encode(personalized)));
       const saveBtn = el("button", { class: "btn btn-go", type: "button", onclick: () => {
         downloadHtml(personalized, "RECOVERY.html");
@@ -1793,13 +2170,283 @@ function showRotate() {
 
   render(kitRail("CHANGE SECRET"),
     title("CHANGE THE PROTECTED SECRET"),
-    lead(`Enter any ${v.k} keys, then the new secret. The keys stay valid — only the ` +
-      "file changes."),
+    lead(v.needsOwnerKey
+      ? `Enter ${keyCountPhrase(v.k, v.n)} and the owner's key, then the new secret. ` +
+        `The ${v.k === 1 ? "key" : "keys"} and the owner's key stay valid — only the file changes.`
+      : `Enter ${keyCountPhrase(v.k, v.n)}, then the new secret. The keys stay valid — only the ` +
+        "file changes."),
     rule(),
+    exactCopyWarning(),
+    ...owner.fields,
     ...panel.fields,
     pair.tabs,
     rule(),
     pair.fields,
+    statusBox,
+    navRow(btn("BACK", showHome), go)
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* upgrade a recovery kit                                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Read a KEEP file someone picked: its SHA-256 as it sits on disk (what the
+ * letter records), what its app code is, and — for a kit — the vault inside,
+ * parsed and integrity-checked. Throws with a user-facing message only when
+ * the file is no KEEP file at all; a damaged vault lands in `vaultError`, so
+ * the verdict on the code can still be shown.
+ */
+async function readKeepFile(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const text = new TextDecoder().decode(bytes);
+  const b64 = vaultPayload(text);
+  const code = await identifyCode(text, await selfDigest());
+  const fileHash = toHex(await sha256(bytes));
+  let vault = null;
+  let vaultB64 = null;
+  let vaultError = null;
+  if (b64 !== null) {
+    try {
+      let raw;
+      try {
+        raw = fromBase64(b64);
+      } catch {
+        throw new Error("The vault block inside this file is damaged (not valid base64). " +
+          "Try the copy on the other USB stick.");
+      }
+      vault = await parseVault(raw);
+      vaultB64 = toBase64(raw);
+    } catch (err) {
+      vaultError = err;
+    }
+  }
+  return { fileHash, isBlank: b64 === null, code, vault, vaultB64, vaultError };
+}
+
+/** A vault that failed to load, as one sentence for the screen. */
+function vaultErrorMessage(err) {
+  return err?.code === "BAD_VERSION"
+    ? "This kit uses a format this tool does not declare itself compatible with. " +
+      "It was probably made by a newer tool — use that tool instead."
+    : String(err?.message ?? err);
+}
+
+/** The made-by line for a stat grid: the version the hash proves, or the
+ *  version the file merely claims. */
+function madeByLabel(code) {
+  if (code.kind === "self") return `${APP_VERSION} · verified`;
+  if (code.kind === "release") return `KEEP ${code.release.version} · verified`;
+  return `${code.claimed ?? "Unknown"} · not verified`;
+}
+
+/** The verdict on a file's app code, as a note. */
+function codeVerdictNote(code) {
+  if (code.kind === "self") {
+    return note("ok", el("strong", { text: "Genuine. " }),
+      `The app code in this file is exactly the code of this tool, ${APP_VERSION}: the ` +
+      "published release, provided this keep.html matches the hash published on GitHub.");
+  }
+  if (code.kind === "release") {
+    return note("ok", el("strong", { text: "Genuine. " }),
+      `The app code in this file is exactly the published KEEP ${code.release.version}.`);
+  }
+  if (code.claimed && compareVersions(code.claimed, APP_VERSION) > 0) {
+    return note("info", el("strong", { text: "Made by a newer tool. " }),
+      `This file says it was made by ${code.claimed}, newer than this tool ` +
+      `(${APP_VERSION}), which cannot know its hash. Verify it with that version ` +
+      "of keep.html or a later one.");
+  }
+  const early = code.claimed && compareVersions(code.claimed, "KEEP 1.1.0") < 0
+    ? "Kits from the first releases can only be matched if they were made in a " +
+      "browser that copies the page the way Chrome does, so this one may still be " +
+      "harmless. "
+    : "";
+  return note("bad", el("strong", { text: "Not verified. " }),
+    "The app code in this file matches no published release of KEEP" +
+    (code.claimed ? `, although it says it is ${code.claimed}` : "") + ". " + early +
+    "It may have been changed. Do not type keys into it: upgrade it with this tool " +
+    "instead, which puts this tool's code around the same vault.");
+}
+
+/**
+ * Verify another KEEP file without opening it: which release its app code
+ * is (by hash, against every release this build knows, and against itself),
+ * and whether the vault inside is intact. Nothing is decrypted.
+ */
+function showVerify() {
+  const results = el("div", {});
+  const picker = el("input", {
+    type: "file", accept: ".html,.htm", "aria-hidden": "true",
+    tabindex: "-1", style: "display:none",
+  });
+  const pickBtn = goBtn("CHOOSE THE FILE", () => picker.click());
+
+  picker.addEventListener("change", async () => {
+    const file = picker.files && picker.files[0];
+    picker.value = ""; // so re-picking the same file fires change again
+    if (!file) return;
+    results.replaceChildren();
+    let f;
+    try {
+      f = await readKeepFile(file);
+    } catch (err) {
+      results.replaceChildren(note("bad", String(err?.message ?? err)));
+      return;
+    }
+    const v = f.vault;
+    results.replaceChildren(
+      // the same grid as the upgrade screen: the kit, then the two tools
+      statGrid([
+        ...(v
+          ? [
+            ["KIT FINGERPRINT", v.fingerprint],
+            ["KEY SET", v.setIdHex],
+            ["SCHEME", schemeLabel(v.k, v.n, v.needsOwnerKey)],
+            ["CREATED", fmtDate(v.createdAt)],
+          ]
+          : [["CONTENTS", f.isBlank ? "Blank tool" : "Damaged kit"]]),
+        ["FILE'S TOOL", madeByLabel(f.code)],
+        ["THIS TOOL", APP_VERSION],
+      ]),
+      codeVerdictNote(f.code),
+      f.isBlank
+        ? note("info", "This is a blank tool, not a kit: it holds no vault.")
+        : v
+          ? note("ok", `The vault inside passed its integrity check (fingerprint ${v.fingerprint}).`)
+          : note("bad", vaultErrorMessage(f.vaultError)),
+      el("div", { class: "kicker spaced", text: "FILE HASH (SHA-256)" }),
+      el("p", { class: "fhint", text: "Compare it with the file hash on the printed letter." }),
+      well(groupHex(f.fileHash))
+    );
+  });
+
+  render({ home: showHome, page: "Verify a Recovery Kit" },
+    title("VERIFY A RECOVERY KIT"),
+    lead("Check a RECOVERY.html before you trust it: which version of KEEP made it, " +
+      "and whether its code is exactly that published release. Nothing is decrypted " +
+      "and no keys are needed."),
+    el("p", { class: "fine", text:
+      "This tool knows the published hash of every KEEP release before it. Check this " +
+      "keep.html itself against the hash published on GitHub first: a tampered tool " +
+      "could vouch for anything." }),
+    rule(),
+    el("div", { class: "btnrow start" }, pickBtn),
+    picker,
+    results,
+    navRow(btn("BACK", showHome))
+  );
+}
+
+/**
+ * Re-wrap an existing kit file with this build of the tool. The vault
+ * bytes are copied over verbatim — no keys are needed and nothing is
+ * decrypted — so the keys, the owner's key, the secret and the kit
+ * fingerprint all survive unchanged; only the app around them (and with
+ * it the file hash) is new. Allowed exactly when this tool declares the
+ * file's format version supported; anything else is refused.
+ */
+function showUpgrade() {
+  const infoHolder = el("div", {});
+  const statusBox = note("blank", "");
+  let loaded = null; // { b64, vault, code }
+
+  const picker = el("input", {
+    type: "file", accept: ".html,.htm", "aria-hidden": "true",
+    tabindex: "-1", style: "display:none",
+  });
+  const pickBtn = goBtn("CHOOSE THE KIT FILE", () => picker.click());
+  const go = goBtn("UPGRADE THE KIT", () => save(), false);
+
+  function paint(kind, content) {
+    statusBox.className = `note note-${kind}`;
+    statusBox.replaceChildren(
+      ...(kind === "blank" ? [] : [icon(NOTE_ICON[kind])]),
+      el("span", {}, [].concat(content))
+    );
+  }
+
+  picker.addEventListener("change", async () => {
+    const file = picker.files && picker.files[0];
+    picker.value = ""; // so re-picking the same file fires change again
+    if (!file) return;
+    loaded = null;
+    setEnabled(go, false);
+    infoHolder.replaceChildren();
+    let f;
+    try {
+      f = await readKeepFile(file);
+      if (f.isBlank) throw new Error("This file is a blank tool. It holds no kit to upgrade.");
+      if (f.vaultError) throw f.vaultError;
+    } catch (err) {
+      paint("bad", vaultErrorMessage(err));
+      return;
+    }
+    loaded = { b64: f.vaultB64, vault: f.vault, code: f.code };
+    const v = loaded.vault;
+    infoHolder.replaceChildren(statGrid([
+      ["KIT FINGERPRINT", v.fingerprint],
+      ["KEY SET", v.setIdHex],
+      ["SCHEME", schemeLabel(v.k, v.n, v.needsOwnerKey)],
+      ["CREATED", fmtDate(v.createdAt)],
+      ["FILE'S TOOL", madeByLabel(loaded.code)],
+      ["THIS TOOL", APP_VERSION],
+    ]));
+    paint("ok", loaded.code.kind === "self"
+      ? "Kit verified. The file already carries this tool version; upgrading simply re-creates it."
+      : `Kit verified: format v${v.version}, which this tool declares itself compatible ` +
+        "with. The keys and the secret carry over unchanged.");
+    setEnabled(go, true);
+  });
+
+  async function save() {
+    const v = loaded.vault;
+    const personalized = withVault(SOURCE_SNAPSHOT, loaded.b64);
+    const hashHex = toHex(await sha256(new TextEncoder().encode(personalized)));
+    const saveBtn = el("button", { class: "btn btn-go", type: "button", onclick: () => {
+      downloadHtml(personalized, "RECOVERY.html");
+      saveBtn.childNodes[1].textContent = "UPGRADED FILE SAVED";
+    } }, [icon("download"), "SAVE THE UPGRADED FILE", el("span", { class: "gocur", text: "_", "aria-hidden": "true" })]);
+    const copyBtn = btn("COPY", () => copyToClipboard(groupHex(hashHex), copyBtn, "COPY", "COPIED"), "btn-small");
+    const saveHashBtn = btn("SAVE FILE HASH", () => {
+      downloadText(`${hashHex}  RECOVERY.html\n`, "RECOVERY-sha256.txt");
+      saveHashBtn.textContent = "FILE HASH SAVED";
+    }, "btn-small");
+
+    render({ home: showHome, page: "Upgrade a Recovery Kit" },
+      title("KIT UPGRADED"),
+      rule(),
+      note("ok", `The kit now carries ${APP_VERSION}. The keys and the fingerprint ` +
+        `(${v.fingerprint}) are unchanged.`),
+      el("div", { class: "btnrow start" }, saveBtn),
+      el("div", { class: "kicker", text: "NEW FILE HASH (SHA-256)" }),
+      el("p", { class: "fhint", text:
+        "The app around the vault changed, so the file hash changed with it. The " +
+        "vault itself did not, so the fingerprint stayed." }),
+      well(groupHex(hashHex)),
+      el("div", { class: "btnrow" }, [copyBtn, el("span", { class: "right" }), saveHashBtn]),
+      note("bad", el("strong", { text: "Replace every old copy. " }),
+        "The printed letter still shows the old file hash. Save the upgraded file to " +
+        "both USB sticks, then open it and print a fresh letter."),
+      navRow(el("span"), btn("DONE", () => location.reload(), "right"))
+    );
+  }
+
+  render({ home: showHome, page: "Upgrade a Recovery Kit" },
+    title("UPGRADE A RECOVERY KIT"),
+    lead("Patch an existing RECOVERY.html. This allows new features while retaining " +
+      "any keys and secrets, which will work as before."),
+    el("p", { class: "fine", text:
+      "You are personally responsible for your recovery kit. Don't delete the old " +
+      "version until you have verified that the new version works. Once you have " +
+      "verified, delete the old version as not to have two files with different " +
+      "versions." }),
+    rule(),
+    exactCopyWarning(),
+    el("div", { class: "btnrow start" }, pickBtn),
+    picker,
+    infoHolder,
     statusBox,
     navRow(btn("BACK", showHome), go)
   );
@@ -1839,22 +2486,37 @@ function usbBlocks(d) {
   }
   return [
     el("h1", { text: "Recovery Kit Instructions" }),
-    el("p", { text:
-      `Below there are listed ${d.n} people with a decryption key. You need any ${d.k} ` +
-      "of those keys, entered into the RECOVERY.html file to decrypt the secret. Fewer " +
-      "than that and it will not be possible to decrypt the contents. Insert the " +
-      "USB-stick into any computer, then click on Recover Secret." }),
+    el("p", { text: d.n === 1
+      ? "Below there is listed one person with a decryption key. You need that key, " +
+        "entered into the RECOVERY.html file to decrypt the secret. Insert the " +
+        "USB-stick into any computer, then click on Recover Secret."
+      : `Below there are listed ${d.n} people with a decryption key. You need ` +
+        `${d.k === d.n ? `all ${d.k}` : d.k === 1 ? "any one" : `any ${d.k}`} ` +
+        "of those keys, entered into the RECOVERY.html file to decrypt the secret. Fewer " +
+        "than that and it will not be possible to decrypt the contents. Insert the " +
+        "USB-stick into any computer, then click on Recover Secret." }),
+    d.ownerExternal
+      ? el("p", {}, [el("strong", { text: "This kit also requires the owner's key" }),
+        " — a code starting with KEEP1, held by the owner separately from this stick. " +
+        "Without it, the keys below cannot decrypt the secret."])
+      : null,
     el("h2", { text: "Kit Identity" }),
     el("table", { class: "kv" }, [
       el("tr", {}, [el("th", { text: "Key Set" }),
         el("td", { class: "mono", text: d.setIdHex })]),
       el("tr", {}, [el("th", { text: "Scheme" }),
-        el("td", { text: `${d.k} of ${d.n} keys` })]),
+        el("td", { text: schemeLabel(d.k, d.n, d.ownerExternal) })]),
       el("tr", {}, [el("th", { text: "Kit Fingerprint" }),
         el("td", { class: "mono", text: d.fingerprint })]),
       el("tr", {}, [el("th", { text: "File Hash, SHA-256" }),
         el("td", { class: "mono", text: d.fileHash })]),
     ]),
+    ...(d.ownerExternal ? [
+      // one line, not two: the note is border-line for one A4 page with
+      // five holders, and a saved line keeps the table on the same sheet
+      el("p", {}, ["The owner's key is stored at the following location:",
+        el("span", { class: "blank inline" })]),
+    ] : []),
     el("h2", { text: "Key Holders" }),
     el("table", {}, [
       el("thead", {}, el("tr", {}, [
@@ -1879,6 +2541,22 @@ function ownerBlocks(d) {
     el("p", { text: "You have chosen to store the USB-sticks at the following locations:" }),
     el("p", {}, ["USB 1:", el("span", { class: "blank inline" })]),
     el("p", {}, ["USB 2:", el("span", { class: "blank inline" })]),
+    el("p", { text:
+      "Tip: if you keep a password vault, consider storing a copy of the holders' " +
+      "keys in it. The yearly decryption test and any secret change then need no " +
+      "key holders. It is paramount that these copies are stored safely, and never " +
+      "together with the recovery file itself." }),
+    ...(d.ownerExternal ? [
+      el("p", {}, ["This kit uses a ", el("strong", { text: "separate owner's key" }),
+        " — a code starting with KEEP1. Every recovery needs it, together with the " +
+        "kit file and the holders' keys; without it, nobody can decrypt the secret, " +
+        "no matter how many holders agree. The yearly check above therefore " +
+        "includes confirming you can still find and read it."]),
+      el("p", {}, ["Store the owner's key somewhere ", el("strong", { text: "secure, yet accessible" }),
+        " if you were to forget your secret, or to your next of kin if you were " +
+        "to perish or become permanently incapacitated. Never store it together " +
+        "with the recovery file itself."]),
+    ] : []),
     el("p", { text:
       "Included with each USB stick there is a recovery instruction set. In that " +
       "instruction set there is a file hash, make sure that the file hash matches the " +
@@ -1971,7 +2649,7 @@ function paginate(container, headText, blocks) {
   }
 
   newPage();
-  for (const block of blocks) {
+  for (const block of blocks.filter(Boolean)) {
     page.body.append(block);
     if (page.body.offsetHeight > limit && page.body.childElementCount > 1) {
       page.body.removeChild(block);
@@ -2018,6 +2696,8 @@ async function showLetter(v, back, tab, knownHash) {
     fingerprint: v ? v.fingerprint : "",
     createdAt: v ? v.createdAt : nowSeconds(),
     fileHash: knownHash || "",
+    // v is a parsed vault (needsOwnerKey) or a ceremony result (ownerKey)
+    ownerExternal: v ? Boolean(v.needsOwnerKey || v.ownerKey) : false,
   };
   if (v && !d.fileHash && PARSED_VAULT) d.fileHash = groupHex(await fileHash());
   let active = v ? tab || "usb" : "holder";
@@ -2069,7 +2749,8 @@ async function showLetter(v, back, tab, knownHash) {
         ? el("div", { class: "strip" }, [
           el("span", { text: "A4 PREVIEW" }),
           el("span", { class: "line" }),
-          el("span", { text: `SET ${d.setIdHex} · ${d.k} OF ${d.n} KEYS` }),
+          el("span", { text:
+            `SET ${d.setIdHex} · ${schemeLabel(d.k, d.n, d.ownerExternal).toUpperCase()}` }),
         ])
         : null,
     ]),

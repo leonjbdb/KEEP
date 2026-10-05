@@ -2,10 +2,15 @@
 // degree-(k-1) polynomial per secret byte, share x-coordinate = card
 // index 1..n. Any k shares interpolate the secret; k-1 shares carry
 // zero information (each unknown coefficient is uniform random).
+//
+// k = 1 is the degenerate constant polynomial: every share IS the
+// secret. The layer above decides where that is acceptable (owner-key
+// kits, where the owner key still gates recovery) — here it is just
+// well-defined math.
 
 import { polyEval, interpolateAtZero } from "./gf256.js";
 
-export const MIN_K = 2;
+export const MIN_K = 1;
 export const MAX_N = 255;
 
 /**

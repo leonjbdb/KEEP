@@ -6,10 +6,13 @@ import { split, combine } from "../src/shamir.js";
 import {
   encodeCard,
   decodeCard,
+  encodeOwnerKey,
+  decodeOwnerKey,
   formatCardForDisplay,
   normalizeCardInput,
   CardError,
   CARD_LENGTH,
+  OWNER_KEY_LENGTH,
 } from "../src/card.js";
 import {
   padPassword,
@@ -118,8 +121,20 @@ test("Shamir: fewer than k shares yields garbage, duplicates throw", () => {
   const wrong = combine(shares.slice(0, 2));
   assert.equal(bytesEqual(wrong, secret), false);
   assert.throws(() => combine([shares[0], shares[0], shares[1]]), /duplicate/);
-  assert.throws(() => split(secret, 1, 5, randomBytes), RangeError);
   assert.throws(() => split(secret, 6, 5, randomBytes), RangeError);
+});
+
+test("Shamir: k = 1 is the constant polynomial — every share is the secret", () => {
+  const secret = randomBytes(32);
+  for (const n of [1, 2, 5]) {
+    const shares = split(secret, 1, n, randomBytes);
+    assert.equal(shares.length, n);
+    for (const s of shares) {
+      assert.equal(bytesEqual(s.y, secret), true);
+      assert.equal(bytesEqual(combine([s]), secret), true);
+    }
+  }
+  assert.throws(() => combine([]), RangeError);
 });
 
 test("cards: display formatting and tolerant input parsing", () => {
@@ -174,6 +189,39 @@ test("cards: every 1..4-character corruption is detected", () => {
     }
     assert.equal(caught instanceof CardError, true);
   }
+});
+
+test("owner key: round trip, display form, and cross-kind confusion errors", () => {
+  const setId = Uint8Array.of(0x0e, 0xdf);
+  const kApp = randomBytes(32);
+  const ownerKey = encodeOwnerKey(setId, kApp);
+  assert.equal(ownerKey.length, OWNER_KEY_LENGTH);
+  assert.match(ownerKey, /^KEEP1/);
+
+  const display = formatCardForDisplay(ownerKey);
+  assert.match(display, /^KEEP1( [A-Z0-9]{1,4})+$/);
+  assert.equal(normalizeCardInput(display), ownerKey);
+
+  const dec = decodeOwnerKey(display.toLowerCase());
+  assert.equal(bytesEqual(dec.setId, setId), true);
+  assert.equal(bytesEqual(dec.kApp, kApp), true);
+
+  // an owner key in a card slot (and the reverse) is named, not just rejected
+  assert.throws(
+    () => decodeCard(ownerKey),
+    (e) => e instanceof CardError && /owner's key/.test(e.message)
+  );
+  const card = encodeCard(1, setId, randomBytes(32));
+  assert.throws(
+    () => decodeOwnerKey(card),
+    (e) => e instanceof CardError && /holders' key/.test(e.message)
+  );
+
+  // the checksum still guards the owner key's data part
+  const chars = ownerKey.toLowerCase().split("");
+  const p = 8;
+  chars[p] = chars[p] === "q" ? "p" : "q";
+  assert.throws(() => decodeOwnerKey(chars.join("")), (e) => e instanceof CardError);
 });
 
 test("cards: wrong length and bad charset produce named errors", () => {

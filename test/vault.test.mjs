@@ -8,8 +8,11 @@ import {
   recoverPasswordBytes,
   rotateVault,
   VaultError,
+  FORMAT_VERSION,
+  FORMAT_VERSION_OWNER_KEY,
+  SUPPORTED_FORMAT_VERSIONS,
 } from "../src/vault.js";
-import { decodeCard } from "../src/card.js";
+import { decodeCard, decodeOwnerKey } from "../src/card.js";
 import { randomBytes, fromHex, toHex, sha256 } from "../src/crypto.js";
 import { seededRandomBytes, combinations } from "./helpers.mjs";
 
@@ -38,6 +41,164 @@ test("golden vector: deterministic regeneration matches frozen bytes", async () 
   assert.deepEqual(res.cards, GOLDEN_CARDS);
   assert.equal(res.setIdHex, "6F71");
   assert.equal(res.fingerprint, "0F7AB044");
+  assert.equal(res.ownerKey, null);
+});
+
+// ---------------------------------------------------------------------------
+// GOLDEN VECTOR 2 — frozen compatibility contract for PKR format v2
+// (separate owner key). Generated once with seededRandomBytes(0xC0FFEE2),
+// createdAt 1755600000, the same password, 3-of-5. Same freeze rules as v1.
+// ---------------------------------------------------------------------------
+const GOLDEN2_OWNER_KEY =
+  "KEEP1PPM0M8YXPPMVR224XJRMMNUS45UU5T7XQH39GN8XKSE498D0AGC5DLTQML6JJL";
+const GOLDEN2_CARDS = [
+  "PSR1PQY8D77ZXGL48A0CPYKJWJRDY6G2UMJ35VF404XZMWSKPC4SZ8WS4CXAKKQF0N2",
+  "PSR1PQG8D7H9Q8R6A0KSD3DGCGL60LWCPTYLQZCN2WXYRAPA8YL95XN778NYDQT7ZM0",
+  "PSR1PQV8D7N7Q6JT8ZN4VALS99JP5XQGE4JSDTKEJQKE26RTTUR2J6D3U7ZRQYWG603",
+  "PSR1PQS8D7SFJEKHMMACUCE5K9HT8V8FM7MTXCHDUXJ0SV27SKSMWUVV5ENASGKLTG8",
+  "PSR1PQ58D75JJY8XPKCAA5TVTG6SU4FERQDYT3E8YGZJETGGUWV5GQJRKQZ6AVNFNUE",
+];
+const GOLDEN2_BYTES_HEX =
+  "89504b520d0a1a0a02008054a4680000000003050edf0d592e734a04fbb9933637f741924e2d8275df1f95eb86dc8f267d3f79e03deec666b5e8d170a9734775a6b9e786492020a6050ce6e87b2ae069cc6d547a87b260c56f1421d3b574691de314c57ddf4e48fd429856778b14144c9260fdb91060cd7b5e293062853266ebd47d60cc2bfed617a21779aa9deb498dfe9288e5b605e118a7026d422b5e425d1f2c3286554f09772d2b3206295ff2431228f5f91d14e226dd9e0cb04890fe4d2c696579d0d9043e46866513a2397a33cd520d75eb4e8c7eec49594656030d632052d83db95d9dfd97053a1eedf016aabbb0d269b2d0da9b4fbdaf2794ca3c2f50bc900000004cbb09e472e8236198128eded5c752cf9e1a45066082af98c12e06a15be5f6c23c13119f1dced1cca8de01c5de7fd6d00c1cbaa077cf38799bb718f14f3a276d1e99465ba276a549993730dbae0975327b2dff9f62945167a8f1496d666980f418e919526cab08a8c38c4ed77ed6c51b7e10f884b57160389001072b445cef1833fbdc539e2d56a5143438da7e1ee3333a1db668a77a7a52accd06e7cb7e92d4e2d1e3ae026b6320601d4d487e4441a5";
+
+test("golden vector v2: deterministic regeneration matches frozen bytes", async () => {
+  const rng = seededRandomBytes(0xc0ffee2);
+  const res = await createVault(GOLDEN_PASSWORD, 3, 5, rng, 1755600000, { separateOwnerKey: true });
+  assert.equal(toHex(res.bytes), GOLDEN2_BYTES_HEX);
+  assert.deepEqual(res.cards, GOLDEN2_CARDS);
+  assert.equal(res.ownerKey, GOLDEN2_OWNER_KEY);
+  assert.equal(res.setIdHex, "0EDF");
+  assert.equal(res.fingerprint, "3A1DB668");
+});
+
+test("golden vector v2: recovery needs owner key + any 3 cards", async () => {
+  const vault = await parseVault(fromHex(GOLDEN2_BYTES_HEX));
+  assert.equal(vault.version, 2);
+  assert.equal(vault.needsOwnerKey, true);
+  assert.equal(vault.kApp, null);
+  const owner = decodeOwnerKey(GOLDEN2_OWNER_KEY);
+  const decoded = GOLDEN2_CARDS.map((c) => decodeCard(c));
+  for (const combo of combinations(decoded, 3)) {
+    assert.equal(await recoverPassword(vault, combo, owner), GOLDEN_PASSWORD);
+  }
+  // the same cards without the owner key must be refused before any decrypt
+  await assert.rejects(
+    () => recoverPassword(vault, decoded.slice(0, 3)),
+    (e) => e instanceof VaultError && e.code === "NEED_OWNER_KEY"
+  );
+});
+
+test("v2 negatives: foreign owner key, tampered commitment, v1/v2 confusion", async () => {
+  const vault = await parseVault(fromHex(GOLDEN2_BYTES_HEX));
+  const decoded = GOLDEN2_CARDS.map((c) => decodeCard(c)).slice(0, 3);
+
+  // an owner key from another ceremony carries another set id
+  const other = await createVault("x", 3, 5, randomBytes, 1, { separateOwnerKey: true });
+  await assert.rejects(
+    () => recoverPassword(vault, decoded, decodeOwnerKey(other.ownerKey)),
+    (e) => e.code === "OWNER_SET_MISMATCH"
+  );
+
+  // same set id, wrong key bytes -> named as not belonging, before decrypt
+  const forged = decodeOwnerKey(GOLDEN2_OWNER_KEY);
+  forged.kApp[0] ^= 0xff;
+  await assert.rejects(
+    () => recoverPassword(vault, decoded, forged),
+    (e) => e.code === "OWNER_KEY_MISMATCH"
+  );
+
+  // handing an owner key to a v1 vault is refused by name
+  const v1 = await parseVault(fromHex(GOLDEN_BYTES_HEX));
+  await assert.rejects(
+    () => recoverPassword(v1, GOLDEN_CARDS.slice(0, 3).map((c) => decodeCard(c)),
+      decodeOwnerKey(GOLDEN2_OWNER_KEY)),
+    (e) => e.code === "OWNER_NOT_NEEDED"
+  );
+
+  // a v2 vault rewritten as v1 (digest fixed) dies on the authenticated AAD:
+  // the attacker-controlled version byte cannot downgrade the format
+  const evil = fromHex(GOLDEN2_BYTES_HEX);
+  evil[8] = 0x01;
+  const body = evil.slice(0, evil.length - 32);
+  evil.set(await sha256(body), evil.length - 32);
+  const downgraded = await parseVault(evil);
+  assert.equal(downgraded.version, 1);
+  await assert.rejects(
+    () => recoverPassword(downgraded, decoded),
+    (e) => e.code === "AEAD_FAIL"
+  );
+});
+
+test("v2 minimal schemes: 1-of-1 and 1-of-2 allowed with the owner's key, v1 refuses them", async () => {
+  for (const [k, n] of [[1, 1], [1, 2], [2, 2]]) {
+    const res = await createVault(`tiny-${k}-${n}`, k, n, randomBytes, 1, { separateOwnerKey: true });
+    const vault = await parseVault(res.bytes);
+    const owner = decodeOwnerKey(res.ownerKey);
+    const decoded = res.cards.map((c) => decodeCard(c));
+    for (let i = 0; i + k <= n; i++) {
+      assert.equal(
+        await recoverPassword(vault, decoded.slice(i, i + k), owner),
+        `tiny-${k}-${n}`
+      );
+    }
+    // the owner's key is still required, even holding every card
+    await assert.rejects(
+      () => recoverPassword(vault, decoded.slice(0, k)),
+      (e) => e.code === "NEED_OWNER_KEY"
+    );
+    // rotation works at the same minimal threshold
+    const rotated = await rotateVault(vault, decoded.slice(0, k), "next", randomBytes, 2, owner);
+    assert.equal(await recoverPassword(await parseVault(rotated.bytes), decoded.slice(0, k), owner), "next");
+  }
+  // without a separate owner's key the 2-of-2 floor stands
+  await assert.rejects(
+    () => createVault("x", 1, 1, randomBytes, 0),
+    (e) => e instanceof VaultError && e.code === "BAD_PARAMS"
+  );
+  await assert.rejects(
+    () => createVault("x", 1, 2, randomBytes, 0),
+    (e) => e instanceof VaultError && e.code === "BAD_PARAMS"
+  );
+});
+
+test("v2 rotation: owner key required, same owner key and cards stay valid", async () => {
+  const vault = await parseVault(fromHex(GOLDEN2_BYTES_HEX));
+  const owner = decodeOwnerKey(GOLDEN2_OWNER_KEY);
+  const decoded = GOLDEN2_CARDS.map((c) => decodeCard(c));
+
+  await assert.rejects(
+    () => rotateVault(vault, decoded.slice(0, 3), "new", randomBytes, 2),
+    (e) => e.code === "NEED_OWNER_KEY"
+  );
+
+  const rotated = await rotateVault(
+    vault, [decoded[0], decoded[2], decoded[4]], "brand-new-password",
+    randomBytes, 1760000000, owner
+  );
+  assert.equal(rotated.setIdHex, "0EDF");
+  assert.notEqual(rotated.fingerprint, "3A1DB668");
+  const v2 = await parseVault(rotated.bytes);
+  assert.equal(v2.version, 2);
+  assert.equal(v2.needsOwnerKey, true);
+  assert.equal(
+    await recoverPassword(v2, [decoded[1], decoded[3], decoded[4]], owner),
+    "brand-new-password"
+  );
+});
+
+test("compatibility declaration: exactly the frozen formats; a newer one is refused up front", async () => {
+  // the upgrade path acts on this list — growing it is a deliberate,
+  // reviewed decision, never a side effect
+  assert.deepEqual(SUPPORTED_FORMAT_VERSIONS, [FORMAT_VERSION, FORMAT_VERSION_OWNER_KEY]);
+  assert.deepEqual(SUPPORTED_FORMAT_VERSIONS, [1, 2]);
+  // a version this build does not declare is refused before any other
+  // check, so the upgrade screen can name the problem precisely
+  const future = fromHex(GOLDEN_BYTES_HEX);
+  future[8] = 3;
+  await assert.rejects(
+    () => parseVault(future),
+    (e) => e instanceof VaultError && e.code === "BAD_VERSION"
+  );
 });
 
 test("golden vector: recovery from frozen bytes with every 3-card combo", async () => {

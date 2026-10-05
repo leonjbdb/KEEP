@@ -3,13 +3,16 @@
 //
 //   off        len   field
 //   0          8     magic 89 50 4B 52 0D 0A 1A 0A  ("\x89PKR\r\n\x1a\n")
-//   8          2     format_version = 1
+//   8          2     format_version = 1 or 2
 //   10         8     created_at (unix seconds, u64)
 //   18         1     threshold k
 //   19         1     shares n
 //   20         2     set_id (random per ceremony)
 //   22         32    hkdf_salt (random)
-//   54         32    K_app (random 32-byte key half held by the kit file)
+//   54         32    v1: K_app (random 32-byte key half held by the kit file)
+//                    v2: owner commitment
+//                      SHA-256("PKRv2 owner-commit" || hkdf_salt || K_app)
+//                      — K_app itself lives only on the separate owner key
 //   86         12    AES-GCM nonce (random, fresh per encryption)
 //   98         32*n  share commitments, i = 1..n:
 //                      SHA-256("PKRv1 share-commit" || hkdf_salt || index || share_y)
@@ -18,16 +21,20 @@
 //   end-32     32    file_digest = SHA-256(all preceding bytes)
 //
 // AAD for the AEAD = bytes 0 .. 102+32n (magic through ct_len): any
-// header tamper fails decryption cryptographically. The trailing digest
-// is the non-cryptographic freshness/bit-rot check ("kit fingerprint" =
-// first 4 digest bytes as 8 hex chars).
+// header tamper fails decryption cryptographically (a v2 kit rewritten
+// as v1 included — the version bytes are authenticated). The trailing
+// digest is the non-cryptographic freshness/bit-rot check ("kit
+// fingerprint" = first 4 digest bytes as 8 hex chars).
 //
 // Decryption key = HKDF-SHA256(salt = hkdf_salt,
 //                              IKM  = K_app || K_share  (fixed order),
 //                              info = "PKRv1 vault-key", L = 32).
+// The derivation is identical in both versions — v2 changes only where
+// K_app is stored (bech32m "KEEP1…" owner key instead of offset 54),
+// which is why the info string keeps its v1 name.
 
 import { split, combine } from "./shamir.js";
-import { encodeCard } from "./card.js";
+import { encodeCard, encodeOwnerKey } from "./card.js";
 import {
   sha256,
   hkdfSha256,
@@ -40,11 +47,18 @@ import {
 } from "./crypto.js";
 
 export const FORMAT_VERSION = 1;
+export const FORMAT_VERSION_OWNER_KEY = 2;
+// The tool's compatibility declaration: the vault format versions this
+// build can read, carry, and re-wrap into a fresh kit file. A file whose
+// version is not listed here is refused rather than guessed at — the
+// upgrade path shows this list as the promise it acts on.
+export const SUPPORTED_FORMAT_VERSIONS = [FORMAT_VERSION, FORMAT_VERSION_OWNER_KEY];
 export const MIN_CARDS = 2;
 export const MAX_CARDS = 10;
 const MAGIC = Uint8Array.of(0x89, 0x50, 0x4b, 0x52, 0x0d, 0x0a, 0x1a, 0x0a);
 const HKDF_INFO = new TextEncoder().encode("PKRv1 vault-key");
 const COMMIT_PREFIX = new TextEncoder().encode("PKRv1 share-commit");
+const OWNER_COMMIT_PREFIX = new TextEncoder().encode("PKRv2 owner-commit");
 
 export class VaultError extends Error {
   constructor(code, message, cardSlot = null) {
@@ -56,13 +70,23 @@ export class VaultError extends Error {
   }
 }
 
-export function validateParams(k, n) {
+/**
+ * A v1 kit needs at least 2 of 2: with K_app in the file, a single key
+ * would make one holder plus any file copy the whole secret. A v2 kit
+ * (separate owner key) may go down to 1 of 1 — the owner key is itself
+ * a required factor, so even then no holder can act alone.
+ */
+export function validateParams(k, n, separateOwnerKey = false) {
+  const minK = separateOwnerKey ? 1 : 2;
+  const minN = separateOwnerKey ? 1 : MIN_CARDS;
   if (!Number.isInteger(k) || !Number.isInteger(n)) {
     throw new VaultError("BAD_PARAMS", "k and n must be integers");
   }
-  if (k < 2) throw new VaultError("BAD_PARAMS", "threshold must be at least 2 keys");
-  if (n < MIN_CARDS || n > MAX_CARDS) {
-    throw new VaultError("BAD_PARAMS", `number of keys must be ${MIN_CARDS}..${MAX_CARDS}`);
+  if (k < minK) {
+    throw new VaultError("BAD_PARAMS", `threshold must be at least ${minK} ${minK === 1 ? "key" : "keys"}`);
+  }
+  if (n < minN || n > MAX_CARDS) {
+    throw new VaultError("BAD_PARAMS", `number of keys must be ${minN}..${MAX_CARDS}`);
   }
   if (k > n) throw new VaultError("BAD_PARAMS", "threshold cannot exceed the number of keys");
 }
@@ -76,6 +100,18 @@ async function commitment(salt, index, shareY) {
   return sha256(buf);
 }
 
+/** Commitment binding a v2 vault to its owner key — identifies a
+ *  wrong-but-well-formed owner key before decryption, like the share
+ *  commitments do for cards. Safe to store: a preimage over the 256
+ *  random bits of K_app. */
+async function ownerCommitment(salt, kApp) {
+  const buf = new Uint8Array(OWNER_COMMIT_PREFIX.length + salt.length + kApp.length);
+  buf.set(OWNER_COMMIT_PREFIX, 0);
+  buf.set(salt, OWNER_COMMIT_PREFIX.length);
+  buf.set(kApp, OWNER_COMMIT_PREFIX.length + salt.length);
+  return sha256(buf);
+}
+
 async function deriveKey(salt, kApp, kShare) {
   const ikm = new Uint8Array(64);
   ikm.set(kApp, 0);
@@ -85,30 +121,47 @@ async function deriveKey(salt, kApp, kShare) {
   return key;
 }
 
-function buildBytes(header, ct, digest) {
-  const out = new Uint8Array(header.length + ct.length + 32);
-  out.set(header, 0);
-  out.set(ct, header.length);
-  out.set(digest, header.length + ct.length);
-  return out;
-}
-
-async function assemble({ createdAt, k, n, setId, salt, kApp, nonce, commitments, ct }) {
+// The header is magic through ct_len: exactly the bytes the AEAD
+// authenticates. `slot54` is the 32-byte field at offset 54 — K_app in a v1
+// vault, the owner commitment in a v2 vault. `ctLen` is known before
+// encrypting (padded plaintext + 16-byte tag), so the header can serve as
+// the AAD and as the file's first bytes alike.
+function buildHeader({ version, createdAt, k, n, setId, salt, slot54, nonce, commitments, ctLen }) {
   const header = new Uint8Array(102 + 32 * n);
   const dv = new DataView(header.buffer);
   header.set(MAGIC, 0);
-  dv.setUint16(8, FORMAT_VERSION, true);
+  dv.setUint16(8, version, true);
   dv.setBigUint64(10, BigInt(createdAt), true);
   header[18] = k;
   header[19] = n;
   header.set(setId, 20);
   header.set(salt, 22);
-  header.set(kApp, 54);
+  header.set(slot54, 54);
   header.set(nonce, 86);
   for (let i = 0; i < n; i++) header.set(commitments[i], 98 + 32 * i);
-  dv.setUint32(98 + 32 * n, ct.length, true);
-  const digest = await sha256(buildBytes(header, ct, new Uint8Array(0)).slice(0, header.length + ct.length));
-  return buildBytes(header, ct, digest);
+  dv.setUint32(98 + 32 * n, ctLen, true);
+  return header;
+}
+
+/** Encrypt under `header` as AAD and lay out the file:
+ *  header || ciphertext+tag || SHA-256 of both. */
+async function sealVault(key, header, nonce, padded) {
+  const ct = await aesGcmSeal(key, nonce, header, padded);
+  if (ct.length !== padded.length + 16) {
+    throw new Error("internal: unexpected ciphertext length");
+  }
+  const body = new Uint8Array(header.length + ct.length);
+  body.set(header, 0);
+  body.set(ct, header.length);
+  const bytes = new Uint8Array(body.length + 32);
+  bytes.set(body, 0);
+  bytes.set(await sha256(body), body.length);
+  return bytes;
+}
+
+/** The kit fingerprint: the first 4 bytes of the trailing digest, as hex. */
+function fingerprintOf(bytes) {
+  return toHex(bytes.slice(bytes.length - 32, bytes.length - 28)).toUpperCase();
 }
 
 /**
@@ -124,16 +177,22 @@ function passwordBytes(password) {
 
 /**
  * Run a full split ceremony.
- * Returns { bytes, cards, setIdHex, fingerprint, k, n, createdAt }.
+ * Returns { bytes, cards, ownerKey, setIdHex, fingerprint, k, n, createdAt }.
  * ("cards" is the internal name for the handwritten key codes.)
  * `randomBytes(len)` supplies ALL randomness (injectable for tests);
- * `createdAt` is unix seconds.
+ * `createdAt` is unix seconds. With `opts.separateOwnerKey` the vault is
+ * written as format v2: K_app is NOT stored in the file — it comes back
+ * as the bech32m `ownerKey` string, and recovery needs it alongside the
+ * k cards. Without the option (v1) `ownerKey` is null.
  */
-export async function createVault(password, k, n, randomBytes, createdAt) {
-  validateParams(k, n);
+export async function createVault(password, k, n, randomBytes, createdAt, opts = {}) {
+  const separateOwnerKey = Boolean(opts.separateOwnerKey);
+  validateParams(k, n, separateOwnerKey);
   const pwBytes = passwordBytes(password);
   const padded = padPassword(pwBytes);
 
+  // the draw order is frozen: the v1 golden vector depends on it, and v2
+  // keeps it so the two modes differ only in where K_app ends up
   const kShare = randomBytes(32);
   const kApp = randomBytes(32);
   const salt = randomBytes(32);
@@ -144,47 +203,33 @@ export async function createVault(password, k, n, randomBytes, createdAt) {
   const commitments = [];
   for (const s of shares) commitments.push(await commitment(salt, s.index, s.y));
 
+  const version = separateOwnerKey ? FORMAT_VERSION_OWNER_KEY : FORMAT_VERSION;
+  const slot54 = separateOwnerKey ? await ownerCommitment(salt, kApp) : kApp;
+
   const key = await deriveKey(salt, kApp, kShare);
-  // AAD = header bytes; build header with a placeholder pass first is
-  // avoided by computing ct length up front (plaintext + 16-byte tag).
-  const headerLen = 102 + 32 * n;
-  const aadProbe = new Uint8Array(headerLen);
-  {
-    const dv = new DataView(aadProbe.buffer);
-    aadProbe.set(MAGIC, 0);
-    dv.setUint16(8, FORMAT_VERSION, true);
-    dv.setBigUint64(10, BigInt(createdAt), true);
-    aadProbe[18] = k;
-    aadProbe[19] = n;
-    aadProbe.set(setId, 20);
-    aadProbe.set(salt, 22);
-    aadProbe.set(kApp, 54);
-    aadProbe.set(nonce, 86);
-    for (let i = 0; i < n; i++) aadProbe.set(commitments[i], 98 + 32 * i);
-    dv.setUint32(98 + 32 * n, padded.length + 16, true);
-  }
-  const ct = await aesGcmSeal(key, nonce, aadProbe, padded);
-  if (ct.length !== padded.length + 16) {
-    throw new Error("internal: unexpected ciphertext length");
-  }
+  const header = buildHeader({
+    version, createdAt, k, n, setId, salt, slot54, nonce, commitments, ctLen: padded.length + 16,
+  });
+  const bytes = await sealVault(key, header, nonce, padded);
   key.fill(0);
   padded.fill(0);
   pwBytes.fill(0);
 
-  const bytes = await assemble({ createdAt, k, n, setId, salt, kApp, nonce, commitments, ct });
   const cards = shares.map((s) => encodeCard(s.index, setId, s.y));
+  const ownerKey = separateOwnerKey ? encodeOwnerKey(setId, kApp) : null;
   kShare.fill(0);
+  kApp.fill(0);
   for (const s of shares) s.y.fill(0);
 
-  const digest = bytes.slice(bytes.length - 32);
   return {
     bytes,
     cards,
+    ownerKey,
     k,
     n,
     createdAt,
     setIdHex: toHex(setId).toUpperCase(),
-    fingerprint: toHex(digest.slice(0, 4)).toUpperCase(),
+    fingerprint: fingerprintOf(bytes),
   };
 }
 
@@ -201,14 +246,14 @@ export async function parseVault(bytes) {
   }
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const version = dv.getUint16(8, true);
-  if (version !== FORMAT_VERSION) {
+  if (!SUPPORTED_FORMAT_VERSIONS.includes(version)) {
     throw new VaultError("BAD_VERSION", `unsupported vault version ${version}`);
   }
   const createdAt = Number(dv.getBigUint64(10, true));
   const k = bytes[18];
   const n = bytes[19];
   try {
-    validateParams(k, n);
+    validateParams(k, n, version === FORMAT_VERSION_OWNER_KEY);
   } catch {
     throw new VaultError("BAD_PARAMS", "vault header has invalid k/n parameters");
   }
@@ -229,14 +274,19 @@ export async function parseVault(bytes) {
   }
   const commitments = [];
   for (let i = 0; i < n; i++) commitments.push(bytes.slice(98 + 32 * i, 98 + 32 * (i + 1)));
+  const needsOwnerKey = version === FORMAT_VERSION_OWNER_KEY;
   return {
     version,
+    needsOwnerKey,
     createdAt,
     k,
     n,
     setId: bytes.slice(20, 22),
     salt: bytes.slice(22, 54),
-    kApp: bytes.slice(54, 86),
+    // one 32-byte field, two meanings: the key half itself in v1, only a
+    // commitment to it in v2 (the key half is on the separate owner key)
+    kApp: needsOwnerKey ? null : bytes.slice(54, 86),
+    ownerCommit: needsOwnerKey ? bytes.slice(54, 86) : null,
     nonce: bytes.slice(86, 98),
     commitments,
     aad: bytes.slice(0, headerLen),
@@ -273,19 +323,58 @@ export async function checkCard(vault, key, slot) {
 }
 
 /**
- * Recover the password as UTF-8 bytes. The caller owns the array and should
- * zero it once done: bytes can be wiped, the string a decode would produce
- * cannot. `recoverPassword` below is the string form, for callers that have
- * to hand the value to something text-shaped.
+ * Validate a decoded owner key ({ setId, kApp }) against a parsed v2 vault.
+ * Exported so entry fields can validate live, like checkCard for cards.
  */
-export async function recoverPasswordBytes(vault, keys) {
+export async function checkOwnerKey(vault, owner) {
+  if (!vault.needsOwnerKey) {
+    throw new VaultError("OWNER_NOT_NEEDED", "this kit stores its own key half; it takes no owner's key");
+  }
+  if (!bytesEqual(owner.setId, vault.setId)) {
+    throw new VaultError(
+      "OWNER_SET_MISMATCH",
+      `the owner's key is from a different key set (kit expects set ${vault.setIdHex})`
+    );
+  }
+  const actual = await ownerCommitment(vault.salt, owner.kApp);
+  if (!bytesEqual(vault.ownerCommit, actual)) {
+    throw new VaultError(
+      "OWNER_KEY_MISMATCH",
+      "the owner's key is valid text but does not belong to this vault file"
+    );
+  }
+}
+
+/** The K_app to derive with: the vault's own in v1, the verified owner
+ *  key's in v2. Both a missing owner key (v2) and a surplus one (v1) are
+ *  the caller's error — silently ignoring key material would hide bugs. */
+async function resolveKApp(vault, owner) {
+  if (!vault.needsOwnerKey) {
+    if (owner) {
+      throw new VaultError("OWNER_NOT_NEEDED", "this kit stores its own key half; it takes no owner's key");
+    }
+    return vault.kApp;
+  }
+  if (!owner) {
+    throw new VaultError("NEED_OWNER_KEY", "this kit needs the owner's key as well as the keys");
+  }
+  await checkOwnerKey(vault, owner);
+  return owner.kApp;
+}
+
+/**
+ * The vault key from exactly k keys (and, for a v2 vault, the owner key):
+ * each key's membership is checked before duplicates, so a foreign key
+ * says "wrong set" rather than "entered twice" even when its index collides
+ * with a valid one. The caller owns the returned key and must zero it.
+ */
+async function vaultKeyFrom(vault, keys, owner) {
   if (keys.length !== vault.k) {
     throw new VaultError("NEED_K", `exactly ${vault.k} keys are required, got ${keys.length}`);
   }
+  const kApp = await resolveKApp(vault, owner);
   const seen = new Set();
   for (let i = 0; i < keys.length; i++) {
-    // membership first: a foreign key should say "wrong set", not
-    // "entered twice", even when its index collides with a valid key
     await checkCard(vault, keys[i], i + 1);
     if (seen.has(keys[i].index)) {
       throw new VaultError("DUPLICATE", `the same key was entered twice (key ${keys[i].index})`, i + 1);
@@ -293,8 +382,20 @@ export async function recoverPasswordBytes(vault, keys) {
     seen.add(keys[i].index);
   }
   const kShare = combine(keys.map((c) => ({ index: c.index, y: c.shareY })));
-  const key = await deriveKey(vault.salt, vault.kApp, kShare);
+  const key = await deriveKey(vault.salt, kApp, kShare);
   kShare.fill(0);
+  return key;
+}
+
+/**
+ * Recover the password as UTF-8 bytes. The caller owns the array and should
+ * zero it once done: bytes can be wiped, the string a decode would produce
+ * cannot. `recoverPassword` below is the string form, for callers that have
+ * to hand the value to something text-shaped. A v2 vault additionally needs
+ * `owner`, the decoded owner key ({ setId, kApp }).
+ */
+export async function recoverPasswordBytes(vault, keys, owner = null) {
+  const key = await vaultKeyFrom(vault, keys, owner);
   let padded;
   try {
     padded = await aesGcmOpen(key, vault.nonce, vault.aad, vault.ct);
@@ -312,8 +413,8 @@ export async function recoverPasswordBytes(vault, keys) {
 }
 
 /** Recover the password as a string. */
-export async function recoverPassword(vault, keys) {
-  const pw = await recoverPasswordBytes(vault, keys);
+export async function recoverPassword(vault, keys, owner = null) {
+  const pw = await recoverPasswordBytes(vault, keys, owner);
   const text = new TextDecoder().decode(pw);
   pw.fill(0);
   return text;
@@ -322,54 +423,36 @@ export async function recoverPassword(vault, keys) {
 /**
  * Rotation: same key set, new password. Requires k valid keys (proves
  * possession), keeps K_app/salt/set_id/commitments, draws a fresh nonce.
+ * A v2 vault additionally needs `owner` — the same owner key stays valid
+ * afterwards, since the vault keeps its commitment.
  */
-export async function rotateVault(vault, keys, newPassword, randomBytes, createdAt) {
-  if (keys.length !== vault.k) {
-    throw new VaultError("NEED_K", `exactly ${vault.k} keys are required, got ${keys.length}`);
-  }
-  const seen = new Set();
-  for (let i = 0; i < keys.length; i++) {
-    await checkCard(vault, keys[i], i + 1);
-    if (seen.has(keys[i].index)) {
-      throw new VaultError("DUPLICATE", `the same key was entered twice (key ${keys[i].index})`, i + 1);
-    }
-    seen.add(keys[i].index);
-  }
-  const kShare = combine(keys.map((c) => ({ index: c.index, y: c.shareY })));
-  const key = await deriveKey(vault.salt, vault.kApp, kShare);
-  kShare.fill(0);
-
+export async function rotateVault(vault, keys, newPassword, randomBytes, createdAt, owner = null) {
+  const key = await vaultKeyFrom(vault, keys, owner);
   const pwBytes = passwordBytes(newPassword);
   const padded = padPassword(pwBytes);
   const nonce = randomBytes(12);
-  const n = vault.n;
-  const headerLen = 102 + 32 * n;
-  const aad = new Uint8Array(headerLen);
-  const dv = new DataView(aad.buffer);
-  aad.set(MAGIC, 0);
-  dv.setUint16(8, FORMAT_VERSION, true);
-  dv.setBigUint64(10, BigInt(createdAt), true);
-  aad[18] = vault.k;
-  aad[19] = n;
-  aad.set(vault.setId, 20);
-  aad.set(vault.salt, 22);
-  aad.set(vault.kApp, 54);
-  aad.set(nonce, 86);
-  for (let i = 0; i < n; i++) aad.set(vault.commitments[i], 98 + 32 * i);
-  dv.setUint32(98 + 32 * n, padded.length + 16, true);
-
-  const ct = await aesGcmSeal(key, nonce, aad, padded);
+  const header = buildHeader({
+    version: vault.version,
+    createdAt,
+    k: vault.k,
+    n: vault.n,
+    setId: vault.setId,
+    salt: vault.salt,
+    slot54: vault.needsOwnerKey ? vault.ownerCommit : vault.kApp,
+    nonce,
+    commitments: vault.commitments,
+    ctLen: padded.length + 16,
+  });
+  const bytes = await sealVault(key, header, nonce, padded);
   key.fill(0);
   padded.fill(0);
   pwBytes.fill(0);
-  const digest = await sha256(buildBytes(aad, ct, new Uint8Array(0)).slice(0, headerLen + ct.length));
-  const bytes = buildBytes(aad, ct, digest);
   return {
     bytes,
     k: vault.k,
-    n,
+    n: vault.n,
     createdAt,
     setIdHex: vault.setIdHex,
-    fingerprint: toHex(digest.slice(0, 4)).toUpperCase(),
+    fingerprint: fingerprintOf(bytes),
   };
 }

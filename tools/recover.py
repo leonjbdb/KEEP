@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Leon Joachim Buverud De Backer
-"""Reference recovery for KEEP (PKR v1) kits, Python standard library only.
+"""Reference recovery for KEEP (PKR v1/v2) kits, Python standard library only.
 
 This is the bit-rot fallback: if the RECOVERY.html tool will not run in
 some future browser, any technically skilled person can recover with
@@ -11,8 +11,10 @@ Usage:
     python3 recover.py RECOVERY.html KEY1 KEY2 KEY3 [...]
     python3 recover.py vault.pkr    KEY1 KEY2 KEY3 [...]
 
-Keys may be given with or without spaces, any letter case. The script
-prints exactly one line: the recovered master password.
+Keys may be given with or without spaces, any letter case, in any order.
+A v2 kit (separate owner's key) additionally needs the owner's KEEP1...
+code among the arguments. The script prints exactly one line: the
+recovered master password.
 
 Everything is implemented from primary specifications (FIPS-197,
 SP 800-38D, RFC 5869, BIP-350) and self-checks against known-answer
@@ -222,20 +224,17 @@ def _hrp_expand(hrp):
     return [ord(c) >> 5 for c in hrp] + [0] + [ord(c) & 31 for c in hrp]
 
 
-def decode_card(raw):
-    # "o" is not in the charset: any o/O typed is a misread zero.
-    s = re.sub(r"[\s\-.·_]", "", raw).lower().replace("o", "0")
-    if len(s) != 67:
-        raise ValueError(f"a key code is exactly 67 characters, got {len(s)}")
-    hrp, data_part = s[:3], s[4:]
-    if hrp != "psr" or s[3] != "1":
-        raise ValueError("not a psr key code")
-    data = [CHARSET.index(c) for c in data_part]
+def _bech32m_payload(s, hrp):
+    """Checksum-verify `s` (already normalized) against `hrp`; return the
+    converted 8-bit payload after the leading version symbol (must be 1)."""
+    if s[:len(hrp)] != hrp or s[len(hrp)] != "1":
+        raise ValueError(f"not a {hrp} code")
+    data = [CHARSET.index(c) for c in s[len(hrp) + 1:]]
     if _polymod(_hrp_expand(hrp) + data) != BECH32M_CONST:
-        raise ValueError("key checksum mismatch, there is a typo")
+        raise ValueError("checksum mismatch, there is a typo")
     data = data[:-6]
     if data[0] != 1:
-        raise ValueError("unknown key version")
+        raise ValueError("unknown code version")
     bits = 0
     acc = 0
     payload = bytearray()
@@ -245,9 +244,32 @@ def decode_card(raw):
         if bits >= 8:
             bits -= 8
             payload.append((acc >> bits) & 0xFF)
+    return payload
+
+
+def _normalize(raw):
+    # "o" is not in the charset: any o/O typed is a misread zero.
+    return re.sub(r"[\s\-.·_]", "", raw).lower().replace("o", "0")
+
+
+def decode_card(raw):
+    s = _normalize(raw)
+    if len(s) != 67:
+        raise ValueError(f"a key code is exactly 67 characters, got {len(s)}")
+    payload = _bech32m_payload(s, "psr")
     if len(payload) != 35:
         raise ValueError("key payload has the wrong size")
     return payload[0], bytes(payload[1:3]), bytes(payload[3:])  # index, set_id, share
+
+
+def decode_owner_key(raw):
+    s = _normalize(raw)
+    if len(s) != 67:
+        raise ValueError(f"an owner's key is exactly 67 characters, got {len(s)}")
+    payload = _bech32m_payload(s, "keep")
+    if len(payload) != 34:
+        raise ValueError("the owner's key payload has the wrong size")
+    return bytes(payload[0:2]), bytes(payload[2:])  # set_id, k_app
 
 
 # --------------------------------------------------------------------------
@@ -312,16 +334,16 @@ def load_pkr(path):
     return base64.b64decode(m.group(1).strip())
 
 
-def recover(pkr, card_strings):
+def recover(pkr, code_strings):
     if len(pkr) < 200 or not pkr.startswith(MAGIC):
         raise ValueError("not a PKR vault file")
     version, = struct.unpack_from("<H", pkr, 8)
-    if version != 1:
+    if version not in (1, 2):
         raise ValueError(f"unsupported vault version {version}")
     k, n = pkr[18], pkr[19]
     set_id = pkr[20:22]
     salt = pkr[22:54]
-    k_app = pkr[54:86]
+    slot54 = pkr[54:86]  # v1: K_app itself; v2: SHA-256 commitment to it
     nonce = pkr[86:98]
     header_len = 102 + 32 * n
     ct_len, = struct.unpack_from("<I", pkr, 98 + 32 * n)
@@ -331,6 +353,25 @@ def recover(pkr, card_strings):
         raise ValueError("vault integrity digest mismatch — corrupted copy")
     aad = pkr[:header_len]
     ct = pkr[header_len:header_len + ct_len]
+
+    # the owner key travels among the other codes; its KEEP1 prefix tells
+    # it apart, so the caller does not have to know which kind is which
+    card_strings = [c for c in code_strings if not _normalize(c).startswith("keep1")]
+    owner_strings = [c for c in code_strings if _normalize(c).startswith("keep1")]
+
+    if version == 1:
+        if owner_strings:
+            raise ValueError("this kit stores its own key half; it takes no owner's key")
+        k_app = slot54
+    else:
+        if len(owner_strings) != 1:
+            raise ValueError("this kit needs exactly one KEEP1... owner's key among the codes")
+        owner_set, k_app = decode_owner_key(owner_strings[0])
+        if owner_set != set_id:
+            raise ValueError("the owner's key belongs to a different key set")
+        commit = hashlib.sha256(b"PKRv2 owner-commit" + salt + k_app).digest()
+        if not hmac.compare_digest(commit, slot54):
+            raise ValueError("the owner's key does not belong to this vault file")
 
     if len(card_strings) != k:
         raise ValueError(f"exactly {k} keys required, got {len(card_strings)}")

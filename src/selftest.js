@@ -8,6 +8,7 @@ import { split, combine } from "./shamir.js";
 import {
   encodeCard,
   decodeCard,
+  decodeOwnerKey,
   bech32mEncode,
   bech32mDecode,
   CARD_LENGTH,
@@ -158,6 +159,41 @@ const CHECKS = [
       if (!refused) throw new Error("k-1 keys were not refused");
     },
   },
+  {
+    name: "Owner's-Key Kit Round Trip (Dummy Secret)",
+    detail: "A v2 kit needs its owner's key; wrong or missing keys are refused",
+    async run() {
+      const password = "self-test v2 dummy pässword ✓";
+      const { bytes, cards, ownerKey } = await createVault(
+        password, 3, 5, randomBytes, 1_700_000_000, { separateOwnerKey: true }
+      );
+      const vault = await parseVault(bytes);
+      if (!vault.needsOwnerKey) throw new Error("v2 vault not flagged as needing the owner key");
+      const owner = decodeOwnerKey(ownerKey);
+      const decoded = cards.map((c) => decodeCard(c));
+      for (const combo of combinations(decoded, 3)) {
+        const got = await recoverPassword(vault, combo, owner);
+        if (got !== password) throw new Error("recovered password differs");
+      }
+      // without the owner key the same k cards must be refused
+      let refused = false;
+      try {
+        await recoverPassword(vault, decoded.slice(0, 3));
+      } catch {
+        refused = true;
+      }
+      if (!refused) throw new Error("missing owner's key was not refused");
+      // a foreign owner key must be named as wrong before decryption
+      const other = await createVault("x", 3, 5, randomBytes, 1_700_000_000, { separateOwnerKey: true });
+      refused = false;
+      try {
+        await recoverPassword(vault, decoded.slice(0, 3), decodeOwnerKey(other.ownerKey));
+      } catch {
+        refused = true;
+      }
+      if (!refused) throw new Error("foreign owner's key was not refused");
+    },
+  },
 ];
 
 /** Names and one-line descriptions, for a UI that lists the checks
@@ -167,12 +203,15 @@ export const SELF_TEST_CHECKS = CHECKS.map((c) => ({ name: c.name, detail: c.det
 /**
  * Run all checks; returns [{ name, detail, ok, error, ms }]. Never throws.
  * `onResult(result, index)` is awaited after each check, so a UI can show
- * progress while the run is still going.
+ * progress while the run is still going. `extraChecks` ({ name, detail,
+ * run }) run after the built-in ones: the app adds what only a page can
+ * check, such as how the browser copies the file.
  */
-export async function runSelfTest(onResult) {
+export async function runSelfTest(onResult, extraChecks = []) {
+  const all = [...CHECKS, ...extraChecks];
   const results = [];
-  for (let i = 0; i < CHECKS.length; i++) {
-    const check = CHECKS[i];
+  for (let i = 0; i < all.length; i++) {
+    const check = all[i];
     const started = Date.now();
     let result;
     try {

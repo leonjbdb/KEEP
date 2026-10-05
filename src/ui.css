@@ -85,8 +85,10 @@ textarea.fieldin.grow,
 textarea.fieldin.grow::-webkit-scrollbar,
 .well.secret.prose::-webkit-scrollbar { display: none; }
 
-/* the wrapper an in-flow scrollable shares with its overlay */
-.scrollhost { position: relative; flex: 1; min-width: 0; }
+/* the wrapper an in-flow scrollable shares with its overlay; z-index: 0
+   opens a stacking context so the thumb's 6 stays inside it, under the
+   scan (3) and vignette (4) layers — the gauge is drawn on the phosphor */
+.scrollhost { position: relative; z-index: 0; flex: 1; min-width: 0; }
 
 .kscroll {
   position: absolute;
@@ -99,8 +101,8 @@ textarea.fieldin.grow::-webkit-scrollbar,
   transition: opacity 60ms ease-out;
   z-index: 6;
 }
-/* level with the shell, under the scan (3) and vignette (4) layers: the
-   page's gauge is drawn on the phosphor like everything else */
+/* under the scan (3) and vignette (4) layers: the page's gauge is drawn
+   on the phosphor like everything else */
 .kscroll-page { position: fixed; top: 0; right: 0; bottom: auto; height: 100vh; z-index: 2; }
 .kscroll[data-on] { opacity: 1; }
 .kscroll svg { display: block; width: 100%; height: 100%; overflow: visible; }
@@ -130,7 +132,7 @@ textarea.fieldin.grow::-webkit-scrollbar,
 
 .fx { position: fixed; inset: 0; pointer-events: none; }
 .fx-glow {
-  z-index: 1;
+  z-index: 0;
   background: radial-gradient(68.75rem 37.5rem at 50% -15%, #1a1408 0%, rgba(12, 10, 6, 0) 70%);
   animation: kbreathe 9s ease-in-out infinite;
 }
@@ -173,9 +175,11 @@ textarea.fieldin.grow::-webkit-scrollbar,
 }
 @keyframes kbreathe { 0%, 100% { opacity: 0.7; } 50% { opacity: 1; } }
 
+/* no z-index: the shell must not form a stacking context, so .paper can
+   lift itself above the scan and vignette layers — ink is not phosphor.
+   The glow (0) stays behind it by DOM order. */
 .shell {
   position: relative;
-  z-index: 2;
   display: flex;
   min-height: 100vh;
 }
@@ -322,6 +326,19 @@ button.kword { cursor: pointer; }
 /* the key mark: teeth are cut from the live parameters, long tooth =
    a key that counts toward the threshold, short = spare */
 .markwrap { margin-top: auto; padding-top: 2.125rem; flex: none; line-height: 0; }
+/* the build's version, under the key mark in the bottom-left margin:
+   machine voice, dimmer than the nav — present, never competing */
+.railver {
+  flex: none;
+  margin-top: 0.6875rem;
+  font-family: var(--mono);
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.125rem;
+  color: var(--label);
+  user-select: none;
+  white-space: nowrap;
+}
 /* the mark's width/height attributes are set in px by markMarkup(); this
    rem height (with width from the viewBox ratio) puts it on the same
    150% scale as everything else. .sheetmark overrides it back for paper. */
@@ -401,6 +418,8 @@ p { margin: 0 0 0.625rem; }
 }
 .rule { height: 0.125rem; flex: none; background: var(--amber); margin: 0.5rem 0 1.125rem; }
 .hair { height: 0.0625rem; flex: none; background: var(--rule); }
+/* a hair that opens a new section keeps the rule's gap to what follows */
+.hair.spaced { margin-bottom: 1.125rem; }
 a { color: var(--amber-lt); }
 
 /* the mono micro-labels: 0.625rem was under every checker's floor, and --label
@@ -821,8 +840,8 @@ textarea.fieldin.grow { resize: vertical; min-height: 8rem; }
   position: fixed;
   inset: 0;
   /* under the scan and vignette layers (3 and 4) so the sheet sits inside
-     the screen effect rather than floating on top of it; above .shell (2)
-     by DOM order, since the layer is appended to <body> after it */
+     the screen effect rather than floating on top of it; above .shell by
+     DOM order, since the layer is appended to <body> after it */
   z-index: 2;
   background: rgba(4, 3, 2, 0.94);
   display: flex;
@@ -874,21 +893,71 @@ textarea.fieldin.grow { resize: vertical; min-height: 8rem; }
   white-space: nowrap;
   transition: color 0.14s linear, background 0.14s linear, box-shadow 0.14s linear;
 }
-.tab:hover { color: var(--amber-lt); background: var(--a07); }
+/* hover invites only where clicking changes something: the active tab
+   keeps its settled look under the pointer */
+.tab:not(.on):hover { color: var(--amber-lt); background: var(--a07); }
 .tab.on {
   color: var(--reverse);
   background: var(--amber);
   box-shadow: 0 0 1.125rem rgba(255, 176, 0, 0.45);
 }
+/* the choice that can lose the secret answers in the warn palette,
+   matching the orange notice it toggles */
+.tab.warn:not(.on):hover { color: var(--warn); background: var(--w07); }
+.tab.warn.on { background: var(--warn); box-shadow: 0 0 1.125rem var(--w45); }
 .tab:focus-visible { outline: 0.125rem solid var(--amber); outline-offset: -0.125rem; }
+/* two alternative notes in one grid cell: the stack is as tall as the
+   taller one, so toggling between them never moves what sits below */
+.notestack { display: grid; margin: 0.875rem 0; }
+.notestack > .note { grid-area: 1 / 1; margin: 0; }
+.notestack > .note.ghost { visibility: hidden; }
+/* a stack that answers the tab strip directly above it sits flush on it */
+.tabs + .notestack { margin-top: 0; }
 @media (max-width: 900px) { .tab { font-size: 0.59375rem; letter-spacing: 0.0625rem; padding: 0.625rem 0.5rem; } }
 
+/* above the scan (3) and vignette (4) layers: the CRT effect belongs to
+   the phosphor around the document, not to the white sheet — scanlines
+   over paper read as banding, and the papfit scale turns them to moiré.
+   The panel carries its own copy of the raster instead (::after below),
+   which flickers out when the view opens: the screen gives way to paper
+   while the lines keep running everywhere else. */
 .paper {
+  position: relative;
+  z-index: 5;
   border: 0.0625rem solid var(--rule);
   background: #100d07;
   padding: 1.625rem;
   overflow: hidden;
 }
+.paper::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background: linear-gradient(to bottom, transparent 50%, rgba(0, 0, 0, 0.3) 51%);
+  background-size: 100% 0.25rem;
+  /* the same crawl as .fx-scan, plus the die-off: the raster holds for a
+     beat, stutters like a failing vertical hold, and drops out — hard
+     cuts per segment via steps(1, end); the forwards fill holds it dark,
+     and visibility: hidden stops the compositor painting the dead layer */
+  animation:
+    kscanlines 2s linear infinite,
+    kscanoff 2.2s steps(1, end) 0.5s forwards;
+}
+@keyframes kscanoff {
+  0% { opacity: 1; }
+  55% { opacity: 1; }
+  58% { opacity: 0.15; }
+  62% { opacity: 0.9; }
+  67% { opacity: 0.3; }
+  71% { opacity: 1; }
+  82% { opacity: 0.1; }
+  86% { opacity: 0.7; }
+  100% { opacity: 0; visibility: hidden; }
+}
+/* a flash-then-gone effect is exactly what reduced motion asks to skip */
+@media (prefers-reduced-motion: reduce) { .paper::after { display: none; } }
 .papfit { transform-origin: top left; }
 
 /* One A4 sheet at 96dpi, with a 2cm margin as its own padding. The
@@ -936,7 +1005,9 @@ textarea.fieldin.grow { resize: vertical; min-height: 8rem; }
 /* ink does not glow: drop the rail mark's phosphor halo on paper */
 .sheetmark .kmark { overflow: visible; height: 26px; width: auto; filter: none; }
 .sheetmark rect.kb { fill: #141414; }
-.sheetmark circle.kb { stroke: #141414; }
+/* paper keeps the plain full-ink bow: the screen's dimmed-bow state
+   (owner key inside the file) is a screen affordance, not a brand change */
+.sheetmark circle.kb { stroke: #141414; opacity: 1; }
 .sheetfoot {
   position: absolute;
   right: 76px;
@@ -997,6 +1068,7 @@ textarea.fieldin.grow { resize: vertical; min-height: 8rem; }
   .shell { display: block; min-height: 0; }
   .main { max-width: none; margin: 0; padding: 0; display: block; }
   .paper { border: 0; background: none; padding: 0; overflow: visible; }
+  .paper::after { display: none; }
   .papfit { transform: none !important; width: auto !important; height: auto !important; }
   .sheet {
     width: auto;

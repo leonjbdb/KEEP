@@ -9,6 +9,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          # the release tags: tests check src/releases.js against the
+          # keep.html published at every earlier tag
+          fetch-depth: 0
       - uses: actions/setup-node@v7
         with:
           node-version: 24

@@ -8,11 +8,22 @@
 // The BCH checksum guarantees detection of any error touching up to 4
 // characters at this length, and misses worse corruption with
 // probability ~2^-30.
+//
+// The owner key (PKR v2 kits only) uses the same machinery with HRP
+// "keep": payload set_id (2) || K_app (32) = 34 bytes -> 55 symbols
+// (2 bits of zero padding), "keep" "1" <version:1><payload:55><checksum:6>
+// = 67 characters as well. The longer HRP makes the two code kinds
+// impossible to confuse in software, and the KEEP1 prefix makes them
+// hard to confuse on paper.
 
 export const HRP = "psr";
 export const CARD_VERSION = 1;
 export const CARD_LENGTH = 67;
 export const SHARE_LEN = 32;
+
+export const OWNER_HRP = "keep";
+export const OWNER_VERSION = 1;
+export const OWNER_KEY_LENGTH = 67;
 
 const CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
 const BECH32M_CONST = 0x2bc830a3;
@@ -148,6 +159,9 @@ export function decodeCard(raw) {
   }
   // bech32m arithmetic is defined over the lowercase charset
   const { hrp, data } = bech32mDecode(str.toLowerCase());
+  if (hrp === OWNER_HRP) {
+    throw new CardError("BAD_HRP", "This is the owner's key, not a holders' key");
+  }
   if (hrp !== HRP) throw new CardError("BAD_HRP", `expected a "${HRP}" key code`);
   if (data.length === 0 || data[0] !== CARD_VERSION) {
     throw new CardError("BAD_VERSION", "unknown key version. Is this from a newer kit?");
@@ -164,17 +178,61 @@ export function decodeCard(raw) {
   };
 }
 
+/** Encode the owner key of a v2 kit. setId: Uint8Array(2), kApp: Uint8Array(32). */
+export function encodeOwnerKey(setId, kApp) {
+  if (setId.length !== 2 || kApp.length !== 32) {
+    throw new RangeError("bad setId or owner key length");
+  }
+  const payload = new Uint8Array(2 + 32);
+  payload.set(setId, 0);
+  payload.set(kApp, 2);
+  const data = [OWNER_VERSION, ...convertBits(payload, 8, 5, true)];
+  const s = bech32mEncode(OWNER_HRP, data);
+  if (s.length !== OWNER_KEY_LENGTH) throw new Error(`internal: owner key length ${s.length}`);
+  return s.toUpperCase();
+}
+
+/** Decode one owner key string -> { version, setId, kApp }. Throws CardError. */
+export function decodeOwnerKey(raw) {
+  const str = normalizeCardInput(raw);
+  if (str.length !== OWNER_KEY_LENGTH) {
+    throw new CardError(
+      "BAD_LENGTH",
+      `an owner's key is exactly ${OWNER_KEY_LENGTH} characters, got ${str.length}`
+    );
+  }
+  const { hrp, data } = bech32mDecode(str.toLowerCase());
+  if (hrp === HRP) {
+    throw new CardError("BAD_HRP", "This is a holders' key, not the owner's key");
+  }
+  if (hrp !== OWNER_HRP) throw new CardError("BAD_HRP", `expected a "${OWNER_HRP}" owner's key`);
+  if (data.length === 0 || data[0] !== OWNER_VERSION) {
+    throw new CardError("BAD_VERSION", "unknown owner's key version. Is this from a newer kit?");
+  }
+  const payload = Uint8Array.from(convertBits(data.slice(1), 5, 8, false));
+  if (payload.length !== 2 + 32) {
+    throw new CardError("BAD_LENGTH", "the owner's key payload has the wrong size");
+  }
+  return {
+    version: OWNER_VERSION,
+    setId: payload.slice(0, 2),
+    kApp: payload.slice(2),
+  };
+}
+
 /**
  * Display form: "PSR1 XXXX XXXX ..." — the canonical uppercase string in
  * groups of 4 after the prefix. Uppercase removes the l/1/I lookalikes
  * when handwritten, and the charset has no O, no I and no B, so the only
  * letter-vs-digit pair left is 0 (always the digit — input maps O back
- * to 0). Decode tolerates any case and grouping.
+ * to 0). Decode tolerates any case and grouping. The owner key formats
+ * the same way; its prefix is KEEP1 and is grouped with the head.
  */
 export function formatCardForDisplay(card) {
   const s = card.toUpperCase();
-  const head = s.slice(0, 4);
-  const rest = s.slice(4);
+  const headLen = s.startsWith(OWNER_HRP.toUpperCase()) ? OWNER_HRP.length + 1 : 4;
+  const head = s.slice(0, headLen);
+  const rest = s.slice(headLen);
   const groups = [];
   for (let i = 0; i < rest.length; i += 4) groups.push(rest.slice(i, i + 4));
   return [head, ...groups].join(" ");
