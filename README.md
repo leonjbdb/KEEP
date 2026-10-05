@@ -105,6 +105,17 @@ with a demo vault, not a real kit):
   </tr>
 </table>
 
+Checking that kit with the blank `keep.html`:
+
+<p align="center">
+  <img src="docs/screenshots/verify.png" alt="Verify a Recovery Kit: the release that made the kit, its genuine code, and the vault check"><br>
+  <sub>Which release made the kit, and whether its code is genuine</sub>
+</p>
+
+The screenshots are regenerated with `node tools/screenshots.mjs`: the
+ceremony runs in headless Chrome with its randomness pinned to the
+golden test vector, so every picture shows the published demo kit.
+
 ---
 
 ## Use
@@ -219,8 +230,9 @@ The screens that write a kit (create, change the secret, upgrade) warn
 before you start if it does not hold.
 
 Kits from 1.0.x predate this and were written from a re-serialized
-copy of the page. Their hashes are listed too, as Chrome serializes
-those releases; a 1.0.x kit made in another browser may not match.
+copy of the page. Their hashes are listed too, as Chrome and Firefox
+serialize those releases (the tests check both agree); a 1.0.x kit
+made in another browser may not match.
 
 ---
 
@@ -285,16 +297,20 @@ vault as the compatibility contract, recovery across every k-key
 combination, key corruption detection, a tamper matrix over every
 region of the vault file, build lint, and a JS-to-Python cross-check.
 
-The browser suite drives headless Chrome through the real file: the blank
-tool upgrades the demo kit, then the kit it wrote is opened, checked
-against its own hash, self-tested, and recovered through the interface.
-It also runs *Verify a Recovery Kit* over genuine, tampered, damaged and
-older kits, and checks that Chrome reproduces every hash in
-`src/releases.js` from the files published at the release tags. The
-Python tests cut `recover.py` out of a kit's manual recovery comment and
-recover that kit with it.
-It needs Chrome or Chromium installed (or `CHROME_PATH`); without one it
-reports itself skipped locally, and fails in CI.
+The browser suite runs the real file end to end in headless Chrome and
+Firefox ([tools/browser.mjs](tools/browser.mjs), no dependencies): whole
+ceremonies through the interface (a standard 3-of-5 kit and a 2-of-3
+owner's-key kit with a multi-line secret), then the kits they wrote are
+reopened, self-tested, recovered, re-encrypted with a new secret,
+verified and upgraded, with refusals for duplicate, missing and foreign
+keys. Every kit written must undo to the exact `keep.html`. It also runs
+*Verify a Recovery Kit* over genuine, tampered, damaged and older kits,
+and checks that each engine reproduces every hash in `src/releases.js`
+from the files published at the release tags. The Python tests cut
+`recover.py` out of a kit's manual recovery comment and recover that kit
+with it. The suite needs Chrome or Chromium and Firefox installed (or
+`CHROME_PATH` / `FIREFOX_PATH`); a missing browser is skipped locally
+and fails in CI.
 
 ---
 
