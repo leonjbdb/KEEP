@@ -34,4 +34,8 @@ export const KNOWN_RELEASES = [
     keep: "e5feb78bfca8dfb57fe34aaa2e689b2b5f4fcfdc1f7ebc3988ffdac16ec3daa4",
     kit: "7709b8fc9de75db582e7c424d737d22a7b8f857adc42952a81d4a557dc3d5780",
   },
+  {
+    version: "1.1.0",
+    keep: "2eaef4016f7bf9eaecf379cb269d9f65332e976ebd6abbf503930f4d5c587d6d",
+  },
 ];

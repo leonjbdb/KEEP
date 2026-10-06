@@ -112,6 +112,22 @@ async function freePort() {
   return port;
 }
 
+// an evaluation sent while the page navigates can go unanswered for good
+// (Firefox does this now and then); waitFor gives each attempt this long
+const ATTEMPT_MS = 2_000;
+
+/** `promise`, or a rejection marked `cutOff` if it has not settled within
+ *  `ms`. A late answer is dropped, a late failure too. */
+function answerWithin(promise, ms) {
+  let timer;
+  const silence = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(Object.assign(
+      new Error(`the browser did not answer within ${ms} ms`), { cutOff: true })), ms);
+  });
+  promise.catch(() => {});
+  return Promise.race([promise, silence]).finally(() => clearTimeout(timer));
+}
+
 /**
  * The page API both engines share. `engine` supplies:
  *   evaluate(expression) -> JSON-able value (the expression is awaited)
@@ -122,12 +138,27 @@ function pageApi(engine) {
   const page = {
     errors: engine.errors,
     eval: (expression) => engine.evaluate(expression),
+    /** Poll `expression` until it is truthy. A reload in progress is "not
+     *  yet": a document still parsing, or without a body, is not evaluated,
+     *  and an evaluation the navigation cut off, or left unanswered, is
+     *  retried. Any other error throws at once. */
     async waitFor(expression, what, timeout = 20_000) {
       const until = Date.now() + timeout;
+      const ready = `document.readyState === "loading" || !document.body ? null : (${expression})`;
+      let cutOff = null;
       for (;;) {
-        const value = await engine.evaluate(expression);
-        if (value) return value;
-        if (Date.now() > until) throw new Error(`timed out waiting for ${what}`);
+        try {
+          const value = await answerWithin(engine.evaluate(ready), ATTEMPT_MS);
+          if (value) return value;
+          cutOff = null;
+        } catch (err) {
+          if (!err.cutOff) throw err;
+          cutOff = err;
+        }
+        if (Date.now() > until) {
+          throw new Error(`timed out waiting for ${what}` +
+            (cutOff ? ` (the last attempt was cut off: ${cutOff.message.trim()})` : ""));
+        }
         await sleep(50);
       }
     },
@@ -196,6 +227,10 @@ function pageApi(engine) {
   return page;
 }
 
+// what CDP answers an evaluation whose page navigated away (a reload) or
+// whose execution context went with it, before the evaluation finished
+const CDP_NAVIGATED = /Inspected target navigated or closed|Execution context was destroyed|Cannot find context with specified id/;
+
 async function launchChrome(exe, { workDir, width, height, scale, beforeLoad, media }) {
   const args = [
     "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
@@ -246,7 +281,13 @@ async function launchChrome(exe, { workDir, width, height, scale, beforeLoad, me
       return pageApi({
         errors,
         async evaluate(expression) {
-          const r = await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
+          let r;
+          try {
+            r = await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
+          } catch (err) {
+            if (CDP_NAVIGATED.test(err.message)) err.cutOff = true;
+            throw err;
+          }
           if (r.exceptionDetails) {
             throw new Error(`in page: ${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text}`);
           }

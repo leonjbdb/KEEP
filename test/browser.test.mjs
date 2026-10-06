@@ -78,8 +78,8 @@ async function setStepper(page, index, target, what) {
 /**
  * A whole ceremony through the interface, as a person would do it. Keys are
  * read off the screen and typed back (in varied spellings, which the app
- * must accept), the proof uses the last k keys, the kit is saved twice, the
- * printed documents are checked, and FINISH is confirmed.
+ * must accept), the proof uses the last k keys, the kit is saved four times,
+ * the printed documents are checked, and FINISH is confirmed.
  */
 async function ceremony(page, { n, k, owner, secret, multiline }) {
   await page.click("Create a Recovery Kit");
@@ -121,7 +121,19 @@ async function ceremony(page, { n, k, owner, secret, multiline }) {
   await page.waitFor(heading("TEST YOUR KEYS"), "the proof");
   let slot = 0;
   if (owner) await page.typeInto("textarea", keys.owner, slot++);
-  for (const card of keys.cards.slice(n - k).reverse()) await page.typeInto("textarea", card, slot++);
+  // a verified slot keeps its check through later slots' input: a repaint
+  // would put in a fresh icon and replay its draw-in animation
+  const checkIn = (i) => `document.querySelectorAll("textarea")[${i}]
+    .closest(".field").querySelector(".icon-check")`;
+  const firstCard = slot;
+  for (const card of keys.cards.slice(n - k).reverse()) {
+    await page.typeInto("textarea", card, slot);
+    await page.waitFor(`Boolean(${checkIn(slot)})`, `slot ${slot} verified`);
+    if (slot === firstCard) await page.eval(`(${checkIn(slot)}).dataset.firstDraw = "1", true`);
+    slot++;
+  }
+  assert.equal(await page.eval(`${checkIn(firstCard)}.dataset.firstDraw ?? null`), "1",
+    "the first key's check was not redrawn when the others were entered");
   await page.click("TEST THE RECOVERY");
   await page.waitFor(has("Recovered. These keys bring the secret back."), "the proof to pass");
   await page.click("CONTINUE");
@@ -130,13 +142,20 @@ async function ceremony(page, { n, k, owner, secret, multiline }) {
   await page.captureDownloads();
   const hash = await shownHash(page);
   const grid = await stats(page);
-  await page.click("CREATE RECOVERY FILE");
-  await page.click("CREATE RECOVERY FILE");
-  await page.waitFor(has("Two copies saved"), "two saves");
-  assert.equal(await page.downloadCount(), 2);
+  // each further save names its copy
+  const confirmations = ["Recovery file saved on device", "2nd copy saved on device",
+    "3rd copy saved on device", "4th copy saved on device"];
+  for (const want of confirmations) {
+    await page.click("CREATE RECOVERY FILE");
+    await page.waitFor(`[...document.querySelectorAll(".note-ok")]
+      .some((n) => n.textContent === ${JSON.stringify(want)})`, `"${want}"`);
+  }
+  assert.equal(await page.downloadCount(), confirmations.length);
   const saved = await page.download();
   assert.equal(saved.name, "RECOVERY.html");
-  assert.equal((await page.download(2)).text, saved.text, "both copies identical");
+  for (let i = 2; i <= confirmations.length; i++) {
+    assert.equal((await page.download(i)).text, saved.text, "every copy identical");
+  }
 
   // the printed documents carry the kit's identity
   await page.click("PRINT");
@@ -387,6 +406,34 @@ for (const kind of ["chrome", "firefox"]) {
         }
         assert.ok(onDisk, "the downloaded file has exactly the bytes the app produced");
         assert.deepEqual(page.errors, []);
+        await page.close();
+      });
+
+    test("the driver's waitFor rides out a page reload, and still fails fast on a mistake",
+      { timeout: 90_000 }, async () => {
+        // a long head keeps the document parsing, still without a body, the
+        // way a large kit file is while it loads
+        const path = await file("reloading.html", "<!doctype html><html><head><meta charset=\"utf-8\">" +
+          "<meta name=\"filler\" content=\"x\">".repeat(60_000) + "</head><body><p>loaded</p></body></html>");
+        const page = await open(path);
+        for (let round = 0; round < 10; round++) {
+          if (round % 2) {
+            // the reload starts inside the clicking evaluation, as FINISH does;
+            // polling on until the new document lands there before its body
+            await page.eval("window.before = true, location.reload(), true");
+            await page.waitFor(`!window.before && document.body.innerText.includes("loaded")`,
+              `the reloaded page (round ${round})`);
+          } else {
+            // an evaluation still running when its page goes away
+            await page.eval("setTimeout(() => location.reload(), 10), true");
+            await page.waitFor(`new Promise((r) => setTimeout(
+              () => r(document.body.innerText.includes("loaded")), 150))`, `the reloaded page (round ${round})`);
+          }
+        }
+        assert.deepEqual(page.errors, []);
+        const started = Date.now();
+        await assert.rejects(page.waitFor("noSuchThing.ready", "a mistake"), /ReferenceError/);
+        assert.ok(Date.now() - started < 5_000, "a real error throws at once, not at the timeout");
         await page.close();
       });
 

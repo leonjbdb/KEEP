@@ -21,7 +21,7 @@
 // for byte (build.mjs lints it, the "Exact Copy" self-test proves it here)
 const SOURCE_SNAPSHOT = "<!DOCTYPE html>\n" + document.documentElement.outerHTML;
 
-const APP_VERSION = "KEEP 1.1.0";
+const APP_VERSION = "KEEP 1.1.1";
 // the human form of the stamp, for the rail's bottom-left margin; the
 // "KEEP x.y" form above is what other builds' upgrade probes look for
 const APP_VERSION_LABEL = APP_VERSION.replace(/^KEEP /, "Version ");
@@ -182,6 +182,12 @@ function fmtDate(unixSeconds) {
   return new Date(unixSeconds * 1000).toLocaleDateString("en-GB", {
     day: "numeric", month: "long", year: "numeric",
   });
+}
+
+/** 2 -> "2nd", 3 -> "3rd", 11 -> "11th", 21 -> "21st". */
+function ordinal(n) {
+  const teen = n % 100 >= 11 && n % 100 <= 13;
+  return `${n}${teen ? "th" : ({ 1: "st", 2: "nd", 3: "rd" })[n % 10] ?? "th"}`;
 }
 
 /** Hex string in groups of 4, easier to write down and compare. */
@@ -802,15 +808,23 @@ function keyEntryPanel(vault, count, onChange, placeholder = "Type a key here") 
       ]),
       decoded: null,
       ok: false,
+      painted: null,
     };
   });
   let generation = 0;
 
   function paint(slot, kind, content) {
+    // validateAll repaints every slot on each keystroke: a slot whose
+    // note is unchanged keeps its nodes, so its check (or warning) does
+    // not replay its entry animation because another slot was typed in
+    const body = el("span", {}, [].concat(content));
+    const painted = `${kind}\n${body.innerHTML}`;
+    if (slot.painted === painted) return;
+    slot.painted = painted;
     slot.noteBox.className = `note note-${kind}`;
     slot.noteBox.replaceChildren(
       ...(kind === "blank" ? [] : [icon(NOTE_ICON[kind])]),
-      el("span", {}, [].concat(content))
+      body
     );
     slot.input.classList.toggle("is-ok", kind === "ok");
     slot.input.classList.toggle("is-bad", kind === "bad");
@@ -1887,9 +1901,9 @@ function showCreateWizard() {
     function paintSaved() {
       if (!ceremony.saved) return;
       status.className = "note note-ok";
-      status.replaceChildren(icon("check"), el("span", { text: ceremony.saved >= 2
-        ? "Two copies saved. Put them on two separate USB sticks."
-        : "One copy saved. Save it a second time, for the second USB stick." }));
+      status.replaceChildren(icon("check"), el("span", { text: ceremony.saved === 1
+        ? "Recovery file saved on device"
+        : `${ordinal(ceremony.saved)} copy saved on device` }));
       setEnabled(finish, true);
     }
     const saveBtn = el("button", { class: "btn btn-go", type: "button", onclick: () => {
